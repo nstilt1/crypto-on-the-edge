@@ -1,0 +1,41 @@
+[package]
+name = "private_key_generator"
+version = "0.1.0-pre.0"
+edition = "2021"
+rust-version = "1.73"
+description = "Private key generator, based on HKDF"
+readme = "README.md"
+keywords = [
+    "crypto",
+    "KDF"
+]
+categories = [
+    "cryptography",
+    "no-std"
+]
+license = "MIT OR Apache-2.0"
+
+[lib]
+doctest = false # need to change this before publishing
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+ecdsa = { version = "0.17.0-pre.5", features = ["signing"]}
+elliptic-curve = { version = "0.14.0-pre.5", features = ["ecdh", "jwk"] }
+hkdf = "=0.13.0-pre.3"
+rand_core = "0.6"
+subtle = "2"
+zeroize = "1"
+
+[dev-dependencies]
+#p256 = { version = "0.14.0-pre.0" }
+rand = "0.8"
+sha2 = "0.11.0-pre.3"
+blake2 = "0.11.0-pre.3"
+
+[features]
+default = ["long-timestamp-timespan", "std"]
+long-timestamp-timespan = [] # expiration times increase to 34,841 years from EPOCH, instead of only 136 years
+lossy-timestamps = [] # expiration timestamps are a byte shorter, and they will be 129-384 seconds larger than the input
+std = ["hkdf/std"] # std is required for checking timestamps against UNIX_EPOCH

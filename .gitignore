@@ -1,0 +1,4 @@
+/target
+rustfmt.toml
+*.sh
+private_key_generator_docs/

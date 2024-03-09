@@ -1,0 +1,5 @@
+[workspace]
+members = [
+    "private_key_generator",
+    "private_key_generator_docs",
+]
