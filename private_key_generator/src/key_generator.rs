@@ -1,5 +1,6 @@
 //! A Private Key Generator based on an [HKDF](hkdf::Hkdf).
 
+//use digest::{CtOutput, Output};
 use crate::{error::InvalidId, traits::CryptoKeyGenerator};
 use ecdsa::{
     elliptic_curve::{ops::Invert, CurveArithmetic, FieldBytes, FieldBytesSize, Scalar},
@@ -14,9 +15,9 @@ use hkdf::{
     hmac::{
         digest::{
             array::{Array, ArraySize},
-            OutputSizeUser,
+            FixedOutputReset, Output, OutputSizeUser,
         },
-        Hmac, SimpleHmac,
+        Hmac, Mac, SimpleHmac,
     },
     Hkdf, HmacImpl,
 };
@@ -28,17 +29,19 @@ use crate::traits::EncodedId;
 
 /// A convenience type if you wish to use a hash function that does not
 /// implement `EagerHash`.
-pub type SimpleKeyGenerator<H> = KeyGenerator<H, SimpleHmac<H>>;
+pub type SimpleKeyGenerator<M, H> = KeyGenerator<M, H, SimpleHmac<H>>;
 
 /// A Private Key Generator based on an [HKDF](hkdf::Hkdf).
 ///
 /// If this struct is generating any of your private keys, consider using a hash
 /// function with a security level that is greater than or equal to the supposed
-/// strength of the private keys.
+/// strength of the private keys... also consider using an HSM.
 ///
 /// Generic Arguments:
 ///
-/// * `HmacDigest` - the hash function you wish to use for the HKDF's HMAC.
+/// * `M` - the type of MAC you want to use. It doesn't need to be super duper
+///   secure, as the MACs will be truncated to just a few bytes.
+/// * `HkdfDigest` - the hash function you wish to use for the HKDF's HMAC.
 /// * `I` - you may not need to supply this, but if the compiler is complaining
 ///   about a trait called `Eager Hash` not being implemented for your hash
 ///   function, then you can pass in `SimpleHmac<H>` to the `I` argument, or use
@@ -67,28 +70,31 @@ pub type SimpleKeyGenerator<H> = KeyGenerator<H, SimpleHmac<H>>;
 ///     b"arbitrary application ID",
 /// );
 /// ```
-pub struct KeyGenerator<HmacDigest, I = Hmac<HmacDigest>>
+pub struct KeyGenerator<M, HkdfDigest, I = Hmac<HkdfDigest>>
 where
-    HmacDigest: OutputSizeUser,
-    I: HmacImpl<HmacDigest>,
+    M: Mac + FixedOutputReset,
+    HkdfDigest: OutputSizeUser,
+    I: HmacImpl<HkdfDigest>,
 {
     /// The internal HKDF this uses, in case you want to access it
-    pub hkdf: Hkdf<HmacDigest, I>,
+    pub hkdf: Hkdf<HkdfDigest, I>,
+    mac: M,
 }
 
-impl<HmacDigest, I> KeyGenerator<HmacDigest, I>
+impl<M, HkdfDigest, I> KeyGenerator<M, HkdfDigest, I>
 where
-    HmacDigest: OutputSizeUser,
-    I: HmacImpl<HmacDigest>,
+    M: Mac + FixedOutputReset,
+    HkdfDigest: OutputSizeUser,
+    I: HmacImpl<HkdfDigest>,
 {
     /// Computes an hmac of an ID.
     fn compute_hmac<Id>(
-        &self,
+        &mut self,
         id: &Id,
         id_type: &[u8],
         additional_input: Option<&[u8]>,
-        output: &mut [u8],
-    ) where
+    ) -> Output<M>
+    where
         Id: EncodedId,
     {
         let info = if let Some(info) = additional_input {
@@ -96,17 +102,17 @@ where
         } else {
             &[]
         };
-        self.hkdf
-            .expand_multi_info(
-                &[&id.as_ref()[..Id::HMAC_START_INDEX], b"hmac", id_type, info],
-                output,
-            )
-            .expect("The ID's HMAC length was way too long")
+
+        let data = &[&id.as_ref()[..Id::HMAC_START_INDEX], b"hmac", id_type, info];
+        for d in data {
+            Mac::update(&mut self.mac, d)
+        }
+        self.mac.finalize_fixed_reset()
     }
 
     /// Validates the HMAC of an ID
     fn validate_hmac<Id>(
-        &self,
+        &mut self,
         id: &Id,
         id_type: &[u8],
         additional_input: Option<&[u8]>,
@@ -114,11 +120,9 @@ where
     where
         Id: EncodedId,
     {
-        let mut hmac = Id::HmacBytes::default();
-        self.compute_hmac(id, id_type, additional_input, hmac.as_mut());
-        if hmac
-            .as_ref()
-            .ct_eq(&id.as_ref()[Id::HMAC_START_INDEX..])
+        let hmac = self.compute_hmac(id, id_type, additional_input);
+        if id.as_ref()[Id::HMAC_START_INDEX..]
+            .ct_eq(&hmac[..Id::HMAC_LENGTH])
             .into()
         {
             Ok(())
@@ -128,43 +132,46 @@ where
     }
 
     /// Fills an ID's HMAC
-    fn fill_id_hmac<Id>(&self, id: &mut Id, id_type: &[u8], additional_input: Option<&[u8]>)
+    fn fill_id_hmac<Id>(&mut self, id: &mut Id, id_type: &[u8], additional_input: Option<&[u8]>)
     where
         Id: EncodedId,
     {
-        let mut hmac = Id::HmacBytes::default();
-        self.compute_hmac(id, id_type, additional_input, hmac.as_mut());
-        id.as_mut()[Id::HMAC_START_INDEX..].copy_from_slice(hmac.as_ref())
+        let hmac = self.compute_hmac(id, id_type, additional_input);
+        id.as_mut()[Id::HMAC_START_INDEX..].copy_from_slice(&hmac[..Id::HMAC_LENGTH])
     }
 }
 
-impl<HmacDigest, I> CryptoKeyGenerator for KeyGenerator<HmacDigest, I>
+impl<M, HkdfDigest, I> CryptoKeyGenerator for KeyGenerator<M, HkdfDigest, I>
 where
-    HmacDigest: OutputSizeUser,
-    I: HmacImpl<HmacDigest>,
+    M: Mac + FixedOutputReset,
+    HkdfDigest: OutputSizeUser,
+    I: HmacImpl<HkdfDigest>,
 {
-    type HmacDigest = HmacDigest;
+    type HkdfDigest = HkdfDigest;
+    type Mac = M;
 
     fn extract(
-        hmac_key: &[u8],
+        hkdf_key: &[u8],
         application_id: &[u8],
+        mac: M,
     ) -> (
-        Array<u8, <Self::HmacDigest as OutputSizeUser>::OutputSize>,
+        Array<u8, <Self::HkdfDigest as OutputSizeUser>::OutputSize>,
         Self,
     ) {
-        let (prk, hkdf) = Hkdf::<HmacDigest, I>::extract(Some(hmac_key), application_id);
+        let (prk, hkdf) = Hkdf::<HkdfDigest, I>::extract(Some(hkdf_key), application_id);
 
-        (prk, Self { hkdf })
+        (prk, Self { hkdf, mac })
     }
 
-    fn from_prk(prk: &[u8]) -> Self {
+    fn from_prk(prk: &[u8], mac: M) -> Self {
         Self {
-            hkdf: Hkdf::<HmacDigest, I>::from_prk(prk).expect("Your prk was not strong enough"),
+            hkdf: Hkdf::<HkdfDigest, I>::from_prk(prk).expect("Your prk was not strong enough"),
+            mac,
         }
     }
 
     fn generate_keyless_id<Id>(
-        &self,
+        &mut self,
         prefix: &[u8],
         id_type: &[u8],
         expiration: Option<u64>,
@@ -180,7 +187,7 @@ where
     }
 
     fn validate_keyless_id<Id>(
-        &self,
+        &mut self,
         id: &[u8],
         id_type: &[u8],
         associated_data: Option<&[u8]>,
@@ -210,7 +217,7 @@ where
     }
 
     fn generate_ecdsa_key_and_id<C, Id>(
-        &self,
+        &mut self,
         prefix: &[u8],
         expiration: Option<u64>,
         associated_data: Option<&[u8]>,
@@ -259,7 +266,7 @@ where
     }
 
     fn validate_ecdsa_key_id<C, Id>(
-        &self,
+        &mut self,
         id: &[u8],
         associated_data: Option<&[u8]>,
     ) -> Result<Id, InvalidId>
@@ -292,7 +299,7 @@ where
     }
 
     fn generate_ecdsa_key_from_id<C, Id>(
-        &self,
+        &mut self,
         id: &Id,
         associated_data: Option<&[u8]>,
     ) -> SigningKey<C>
@@ -340,7 +347,7 @@ where
     }
 
     fn generate_ecdh_pubkey_and_id<C, Id>(
-        &self,
+        &mut self,
         prefix: &[u8],
         expiration: Option<u64>,
         associated_data: Option<&[u8]>,
@@ -391,7 +398,7 @@ where
     }
 
     fn validate_ecdh_key_id<Id>(
-        &self,
+        &mut self,
         id: &[u8],
         associated_data: Option<&[u8]>,
     ) -> Result<Id, InvalidId>
@@ -493,18 +500,15 @@ mod tests {
     use crate::typenum::consts::{U48, U5};
     use crate::BinaryId;
     use crate::{traits::CryptoKeyGenerator, KeyGenerator};
-    use blake2::Blake2b512;
+    use hkdf::hmac::{Hmac, KeyInit};
     use rand::rngs::StdRng;
     use rand::SeedableRng;
     use sha2::Sha256;
 
-    use super::SimpleKeyGenerator;
-    //use p256::NistP256;
-
     const MAX_PREFIX_LEN: usize = 6;
 
     type TestId = BinaryId<U48, U5, MAX_PREFIX_LEN, 0, 1, 3, 1709349508>;
-    type Sha2KeyGenerator = KeyGenerator<Sha256>;
+    type Sha2KeyGenerator = KeyGenerator<Hmac<Sha256>, Sha256>;
 
     const TEST_HMAC_KEY: [u8; 32] = [42u8; 32];
 
@@ -519,7 +523,11 @@ mod tests {
 
     macro_rules! init_keygenerator {
         () => {
-            Sha2KeyGenerator::new(&TEST_HMAC_KEY, &[])
+            Sha2KeyGenerator::new(
+                &TEST_HMAC_KEY,
+                &[],
+                Hmac::<Sha256>::new_from_slice(&[4; 32]).unwrap(),
+            )
         };
     }
 
@@ -527,13 +535,13 @@ mod tests {
     mod validation {
 
         use super::{
-            CryptoKeyGenerator, InvalidId, SeedableRng, Sha2KeyGenerator, StdRng, TestId,
-            TEST_HMAC_KEY, TEST_ID_TYPE,
+            CryptoKeyGenerator, Hmac, InvalidId, KeyInit, SeedableRng, Sha256, Sha2KeyGenerator,
+            StdRng, TestId, TEST_HMAC_KEY, TEST_ID_TYPE,
         };
 
         #[test]
         fn keyless_id_with_associated_data() {
-            let key_generator = init_keygenerator!();
+            let mut key_generator = init_keygenerator!();
 
             let original_associated_data = b"providing additional data for the id generation requires providing the same data during validation. This is useful for when only a specific client should be using a specific Key ID, and it also affects the actual value of the private key associated with Key IDs (although that aspect does not apply to keyless IDs).";
 
@@ -580,7 +588,7 @@ mod tests {
 
         #[test]
         fn keyless_id_without_associated_data() {
-            let key_generator = init_keygenerator!();
+            let mut key_generator = init_keygenerator!();
 
             let id_without_associated_data =
                 key_generator.generate_keyless_id::<TestId>(&[], b"test", None, None, &mut rng!());
@@ -594,7 +602,7 @@ mod tests {
 
         #[test]
         fn different_keyless_id_types() {
-            let key_generator = init_keygenerator!();
+            let mut key_generator = init_keygenerator!();
 
             let id_type_1 = key_generator.generate_keyless_id::<TestId>(
                 &[],
@@ -619,7 +627,7 @@ mod tests {
 
         #[test]
         fn basic_hmac_checks() {
-            let key_generator = init_keygenerator!();
+            let mut key_generator = init_keygenerator!();
 
             let id = key_generator.generate_keyless_id::<TestId>(
                 &[],
@@ -660,7 +668,7 @@ mod tests {
 
     #[test]
     fn truncated_prefix() {
-        let key_generator = init_keygenerator!();
+        let mut key_generator = init_keygenerator!();
 
         let test_prefix = [1, 2, 3, 4, 5, 6, 7, 8, 9];
 
@@ -689,10 +697,7 @@ mod tests {
 
     #[test]
     fn ecdh_key_generation_and_regeneration() {
-        let key_generator = KeyGenerator::<Sha256>::new(
-            &[42u8; 32],
-            b"some other value that changes the outcomes of our private key generation functions",
-        );
+        let key_generator = init_keygenerator!();
 
         let mut aes_key = [0u8; 32];
         key_generator.generate_resource_encryption_key(b"test", &[], &[], &mut aes_key)
@@ -706,7 +711,7 @@ mod tests {
 
     #[test]
     fn resource_encryption_key_regeneration() {
-        let key_generator = KeyGenerator::<Sha256>::new(&[42u8; 32], b"");
+        let key_generator = init_keygenerator!();
         let mut aes_key = [0u8; 32];
         key_generator.generate_resource_encryption_key(
             b"my resource",
@@ -723,10 +728,5 @@ mod tests {
         );
 
         assert_eq!(aes_key, test);
-    }
-
-    #[test]
-    fn different_hash_algorithms() {
-        let generator = SimpleKeyGenerator::<Blake2b512>::new(&[3u8; 32], b"test");
     }
 }

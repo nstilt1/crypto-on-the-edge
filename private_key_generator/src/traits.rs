@@ -9,9 +9,12 @@ use elliptic_curve::{
     sec1::{FromEncodedPoint, ModulusSize, ToEncodedPoint},
     AffinePoint, CurveArithmetic, FieldBytesSize, JwkParameters, PublicKey, Scalar,
 };
-use hkdf::hmac::digest::{
-    array::{Array, ArraySize},
-    OutputSizeUser,
+use hkdf::hmac::{
+    digest::{
+        array::{Array, ArraySize},
+        OutputSizeUser,
+    },
+    Mac,
 };
 use subtle::CtOption;
 
@@ -87,14 +90,17 @@ pub trait EncodedId:
 /// another library.
 pub trait CryptoKeyGenerator: Sized {
     /// The digest used within the HMAC of the HKDF
-    type HmacDigest: OutputSizeUser;
+    type HkdfDigest: OutputSizeUser;
+
+    /// The Mac used for generating and validating IDs
+    type Mac: Mac;
 
     /// A convenience method for [extract()](CryptoKeyGenerator::extract) that
     /// discards the PRK value.
     ///
     /// See [Hkdf::new()](hkdf::Hkdf::new).
-    fn new(hmac_key: &[u8], application_id: &[u8]) -> Self {
-        let (_, hkdf) = Self::extract(hmac_key, application_id);
+    fn new(hkdf_key: &[u8], application_id: &[u8], mac: Self::Mac) -> Self {
+        let (_, hkdf) = Self::extract(hkdf_key, application_id, mac);
         hkdf
     }
 
@@ -132,10 +138,11 @@ pub trait CryptoKeyGenerator: Sized {
     /// * keys longer than the `Output Size` are acceptable, but this is
     ///   primarily viable for lower-entropy HMAC keys
     fn extract(
-        hmac_key: &[u8],
+        hkdf_key: &[u8],
         application_id: &[u8],
+        mac: Self::Mac,
     ) -> (
-        Array<u8, <Self::HmacDigest as OutputSizeUser>::OutputSize>,
+        Array<u8, <Self::HkdfDigest as OutputSizeUser>::OutputSize>,
         Self,
     );
 
@@ -154,7 +161,7 @@ pub trait CryptoKeyGenerator: Sized {
     /// # Panics
     /// This panics when the `prk`'s length is less than the output size of the
     /// hash function.
-    fn from_prk(prk: &[u8]) -> Self;
+    fn from_prk(prk: &[u8], mac: Self::Mac) -> Self;
 
     /// Generates an ID that is not explicitly used for generating a private
     /// key.
@@ -174,7 +181,7 @@ pub trait CryptoKeyGenerator: Sized {
     /// * `rng` - an RNG that will generate the majority of the pseudorandom
     ///   bytes in the ID
     fn generate_keyless_id<Id>(
-        &self,
+        &mut self,
         prefix: &[u8],
         id_type: &[u8],
         expiration: Option<u64>,
@@ -196,7 +203,7 @@ pub trait CryptoKeyGenerator: Sized {
     /// * `id` - the binary ID slice
     /// * `id_type` - the type of ID
     fn validate_keyless_id<Id>(
-        &self,
+        &mut self,
         id: &[u8],
         id_type: &[u8],
         associated_data: Option<&[u8]>,
@@ -219,7 +226,7 @@ pub trait CryptoKeyGenerator: Sized {
     /// * `rng` - an RNG that will generate the majority of the pseudorandom
     ///   bytes in the ID
     fn generate_ecdsa_key_and_id<C, Id>(
-        &self,
+        &mut self,
         prefix: &[u8],
         expiration: Option<u64>,
         associated_data: Option<&[u8]>,
@@ -245,7 +252,7 @@ pub trait CryptoKeyGenerator: Sized {
     /// * `associated_data` - Any potentially associated data, such as a client
     ///   ID.
     fn validate_ecdsa_key_id<C, Id>(
-        &self,
+        &mut self,
         id: &[u8],
         associated_data: Option<&[u8]>,
     ) -> Result<Id, InvalidId>
@@ -270,7 +277,7 @@ pub trait CryptoKeyGenerator: Sized {
     /// function's `OutputSize * 255`. This should not happen unless the
     /// `FieldBytesSize` is ridiculously large.
     fn generate_ecdsa_key_from_id<C, Id>(
-        &self,
+        &mut self,
         id: &Id,
         associated_data: Option<&[u8]>,
     ) -> SigningKey<C>
@@ -309,7 +316,7 @@ pub trait CryptoKeyGenerator: Sized {
     /// function's `OutputSize * 255`. This should not happen unless the
     /// `FieldBytesSize` is ridiculously large.
     fn generate_ecdh_pubkey_and_id<C, Id>(
-        &self,
+        &mut self,
         prefix: &[u8],
         expiration: Option<u64>,
         associated_data: Option<&[u8]>,
@@ -334,7 +341,7 @@ pub trait CryptoKeyGenerator: Sized {
     /// * `associated_data` - any associated data that might be required for the
     ///   HMAC computation.
     fn validate_ecdh_key_id<Id>(
-        &self,
+        &mut self,
         id: &[u8],
         associated_data: Option<&[u8]>,
     ) -> Result<Id, InvalidId>
