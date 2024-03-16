@@ -328,6 +328,25 @@ impl<
         const VERSION: u8,
         const VERSION_BITS: u8,
         const EPOCH: u64,
+    > Default
+    for BinaryId<IdLen, HmacLen, MAX_PREFIX_LEN, METADATA_OFFSET, VERSION, VERSION_BITS, EPOCH>
+{
+    fn default() -> Self {
+        Self {
+            id: Default::default(),
+            _hmac_len: PhantomData,
+        }
+    }
+}
+
+impl<
+        IdLen: Unsigned + ArraySize,
+        HmacLen: Unsigned,
+        const MAX_PREFIX_LEN: usize,
+        const METADATA_OFFSET: usize,
+        const VERSION: u8,
+        const VERSION_BITS: u8,
+        const EPOCH: u64,
     > AsMut<[u8]>
     for BinaryId<IdLen, HmacLen, MAX_PREFIX_LEN, METADATA_OFFSET, VERSION, VERSION_BITS, EPOCH>
 {

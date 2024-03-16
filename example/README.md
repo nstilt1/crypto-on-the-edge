@@ -1,0 +1,9 @@
+This folder contains an incomplete example that uses `HttpPrivateKeyManager` to decrypt requests and encrypt its responses to them. The following steps need to be taken to implement a crypto system with this:
+
+1. Distribute Public Keys and Key IDs. They could be periodically updated on a webpage, or returned from an API method. You will want to ensure that clients that receive keys this way are verifying the TLS signature when fetching keys.
+
+2. The client needs to initiate a handshake that uses one of those ECDH keys, and an ECDSA key ID. The server will generate the private keys, and use them when decrypting the request, and encrypting and signing the response. The server will also need to store the newly generated client ID in a database, along with the client's public ECDSA key. Consider hashing the client ID before it goes into the database. If there is a collision, it can be regenerated.
+
+The server must then send a response that includes the client's new ID, as well as the next ECDH public key and ECDH key ID for the client to use in the next request. The key will be bound to the client.
+
+It may be necessary to store the client-bound ECDH key ID in the database to prevent any replay attacks. It could be stored with a "last-use" timestamp, initialized to 0. Upon receiving a new request with a bound key ID, the server verifies that the ID exists in the database, and if the timestamp is 0, it sets it to the current time. For all other IDs in the client's entry in the database, they could either be purged, or only purging those that have timestamps that are older than, say, 10 seconds.

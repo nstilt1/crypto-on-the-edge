@@ -108,7 +108,12 @@
 #[cfg(feature = "std")]
 extern crate std;
 
+pub use ecdsa;
 pub use hkdf::hmac::digest::typenum;
+pub use hkdf::hmac::digest::Digest;
+
+pub use elliptic_curve;
+pub use hkdf;
 
 mod id;
 mod key_generator;
@@ -117,6 +122,7 @@ mod error;
 mod traits;
 mod utils;
 
+pub use error::InvalidId;
 pub use id::BinaryId;
 pub use key_generator::{KeyGenerator, SimpleKeyGenerator};
 pub use traits::{CryptoKeyGenerator, EncodedId};

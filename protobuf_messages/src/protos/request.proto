@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package request;
+
+// Some information that is necessary to decrypt the request
+message DecryptInfo {
+    // the ecdh key used for decrypting the request
+    bytes server_ecdh_key_id = 1;
+
+    // the client's ecdh pubkey for decrypting the request
+    bytes client_ecdh_pubkey = 2;
+
+    // the `info` string for use in an HKDF for decrypting the request
+    bytes ecdh_info = 3;
+
+    // the `salt` string for use in an HKDF for decrypting the request
+    bytes ecdh_salt = 4;
+}
+
+// An API request to the Service.
+message Request {
+    // this value allows the client to decide which symmetric encryption 
+    // algorithm will be used for the request and response. The server may 
+    // reject the request if the value here is unacceptable.
+    string symmetric_algorithm = 1;
+
+    // the client's ID, or their desired prefix for their ID based on whether 
+    // this is the initial handshake or not
+    string client_id = 2;
+
+    // Encrypted payload with the nonce prefixed to the encrypted data
+    bytes data = 3;
+
+    // Information to decrypt the request
+    DecryptInfo decryption_info = 4;
+
+    // The ECDSA key ID that the server will use to sign its response
+    bytes server_ecdsa_key_id = 5;
+
+    // the timestamp, in seconds since UNIX_EPOCH
+    uint64 timestamp = 6;
+}

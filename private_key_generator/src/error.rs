@@ -10,7 +10,7 @@
 /// There are a few types of invalid IDs. Any one of these errors can be caused
 /// by a forged ID, but they can also be caused by misuse; in particular, the
 /// `IdExpectedAssociatedData` error and the `PossiblyInBase64` error.
-#[derive(PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum InvalidId {
     /// The length of an ID byte slice was not the same length associated with
     /// your `BinaryId`'s `IdLen` value.
@@ -49,7 +49,7 @@ pub enum InvalidId {
     BadHMAC,
 }
 
-impl core::fmt::Debug for InvalidId {
+impl core::fmt::Display for InvalidId {
     /// Enable debug mode to view more detailed errors. Otherwise, it will just
     /// say "ID not found," implying that your program checked the database to
     /// see if the ID was there or not. Sometimes, it might be best to let an

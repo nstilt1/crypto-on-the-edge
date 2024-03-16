@@ -22,7 +22,7 @@ use subtle::CtOption;
 /// extra data, a bit to determine whether there is an expiration timestamp, an
 /// expiration timestamp if there is one, and a truncated HMAC.
 pub trait EncodedId:
-    AsRef<[u8]> + AsMut<[u8]> + for<'a> TryFrom<&'a [u8], Error = InvalidId>
+    AsRef<[u8]> + AsMut<[u8]> + for<'a> TryFrom<&'a [u8], Error = InvalidId> + Default
 {
     /// The length of the ID in bytes
     const ID_LEN: usize;
@@ -271,7 +271,7 @@ pub trait CryptoKeyGenerator: Sized {
     /// `FieldBytesSize` is ridiculously large.
     fn generate_ecdsa_key_from_id<C, Id>(
         &self,
-        id: Id,
+        id: &Id,
         associated_data: Option<&[u8]>,
     ) -> SigningKey<C>
     where
@@ -358,7 +358,7 @@ pub trait CryptoKeyGenerator: Sized {
     /// `FieldBytesSize` is ridiculously large.
     fn ecdh_using_key_id<C, Id>(
         &self,
-        id: Id,
+        id: &Id,
         associated_data: Option<&[u8]>,
         pubkey: PublicKey<C>,
     ) -> SharedSecret<C>
