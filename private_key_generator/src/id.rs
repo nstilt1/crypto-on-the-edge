@@ -2,31 +2,22 @@
 //! [EncodedId](crate::EncodedId).
 //!
 //! The expiration timestamps located within the ID are compressed from 8 bytes
-//! to 3 bytes. It is somewhat lossy compression, but it allows the ID to
-//! contain 5 more pseudorandom bytes. This is what is lost in the compressed
-//! timestamp:
+//! to TIMESTAMP_BITS bits. It is somewhat lossy compression, but it allows you
+//! to specify the length. This is what is lost in the compressed timestamp:
 //!
 //! 1. the full range of seconds since UNIX_EPOCH. This timestamp can only
-//!    represent 136 years ahead of the chosen `EPOCH`.
-//! 2. the exact second that the expiration was meant to occur. Our compression
-//!    makes the base unit of time `256 seconds`, and the expiration time will
-//!    be rounded up by between 129-384 seconds.
+//!    represent up to `2^(TIMESTAMP_BITS + TIMESTAMP_PRECISION_REDUCTION)`
+//!    seconds from the specified EPOCH.
+//! 2. the exact second that the expiration was meant to occur. If
+//!    `TIMESTAMP_PRECISION_REDUCTION` is greater than 0, the expiration time in
+//!    the ID will be a little bit larger than the input time. The expiration
+//!    time will be between `2^(TIMESTAMP_PRECISION_REDUCTION - 1) + 1` seconds
+//!    to `2^(TIMESTAMP_PRECISION_REDUCTION) + 2^(TIMESTAMP_PRECISION_REDUCTION
+//!    - 1)` seconds larger than the original expiration time.
 //!
 //! The `EPOCH` can be changed using a different `VERSION` of the `BinaryId`,
-//! and you can probably safely disregard the minor inconsistency with the
-//! expiration time's precision.
-//!
-//! The following chart shows the increase in time, which is dependent on the
-//! chosen expiration time.
-//!
-//! | Time % 256 | Total Increase  |
-//! |------------|-----------------|
-//! | 0          | 256 - 0   = 256 |
-//! | 64         | 256 - 64  = 192 |
-//! | 127        | 256 - 127 = 129 |
-//! | 128        | 512 - 128 = 384 |
-//! | 129        | 512 - 129 = 383 |
-//! | 255        | 512 - 255 = 257 |
+//! but it will likely be turned into a function parameter rather than a
+//! constant parameter to allow for automatically versioning IDs.
 
 use hkdf::hmac::digest::{
     array::{Array, ArraySize},
@@ -40,81 +31,47 @@ use elliptic_curve::rand_core::RngCore;
 #[cfg(feature = "std")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::error::InvalidId;
+use crate::{
+    error::InvalidId,
+    utils::{extract_ints_from_slice, insert_ints_into_slice},
+};
 use crate::{traits::EncodedId, utils::BoolMath};
 
-/// Timestamps can represent up to 136 years in the future, but will be between
-/// 129-384 seconds ahead of the input expiration time.
-#[cfg(all(feature = "lossy-timestamps", feature = "long-timestamp-timespan"))]
-const TIMESTAMP_BYTES: usize = 4;
-#[cfg(all(feature = "lossy-timestamps", not(feature = "long-timestamp-timespan")))]
-const TIMESTAMP_BYTES: usize = 3;
-
-#[cfg(all(
-    not(feature = "lossy-timestamps"),
-    not(feature = "long-timestamp-timespan")
-))]
-/// Timestamps can represent up to 136 years in the future, and the exact second
-/// of the expiration is preserved
-const TIMESTAMP_BYTES: usize = 4;
-
-#[cfg(all(not(feature = "lossy-timestamps"), feature = "long-timestamp-timespan"))]
-const TIMESTAMP_BYTES: usize = 5;
-
-/// A binary-encoded ID struct.
+/// Represents a Binary ID structure with configurable parameters for size,
+/// versioning, and expiration encoding.
 ///
-/// IDs will be of the type `Array<u8, IdLen>`, and will have this format:
-/// * `[Prefix][TimeStamp][RandomBytes][HMAC]`
-///   * `Prefix` will either be pseudorandom bytes, or a prefix followed by
-///     pseudorandom bytes. This region is `MAX_PREFIX_LEN` bytes long. 4 Base64
-///     characters can be represented with 3 bytes, so you might want it to be a
-///     multiple of 3.
-///   * `Timestamp` is only present in expiring IDs, and can only represent
-///     times up to 136 years from the specified `EPOCH`. It is 3 bytes long if
-///     feature `lossy-timestamps` is active, or 4 bytes long if it is disabled.
-///     With a lossy timestamp the timestamp is slightly less precise,
-///     increasing the expiration timestamps by a value between 129-384 seconds,
-///     depending on the timestamp's value.
-///   * `RandomBytes` is a sequence of psuedorandom bytes, with a metadata byte
-///     included among them, located at `METADATA_OFFSET` bytes into this
-///     region. The metadata byte indicates whether the `HMAC` was calculated
-///     with additional data, if there is a timestamp encoded in the ID, and the
-///     `VERSION` of the ID. The `VERSION` must be able to be represented with
-///     `VERSION_BITS` bits, and must not exceed 6 since the other 2 bits are
-///     being used. This might change to optionally use an extra byte or two for
-///     the `VERSION`.
-///   * `HMAC` is a message authentication code that is used to validate the ID,
-///     with a length of `HmacLen` bytes. This `HMAC` may be computed using
-///     additional associated data, and that will be indicated in the encoded
-///     ID's metadata. Each byte adds 8 bits of security. The following chart
-///     shows a few probabilities... but the average for a given `HmacLen` is
-///     more like half of the shown probability.
+/// IDs will be of the type `Array<u8, IdLength>`, and will have this format:
 ///
-/// | HmacLen |  Probability of a false validation |
-/// |---------|------------------------------------|
-/// | 1       |  1/256                             |
-/// | 2       |  1/65,536                          |
-/// | 3       |  1/16,777,216                      |
-/// | 4       |  1/4,294,967,296                   |
-/// | 5       |  1/1,099,511,627,776               |
+/// `[Prefix][Metadata][RandomBytes][MAC]`
 ///
-/// # Generic Arguments
-/// Here's a quick recap of the generic arguments mentioned above.
+/// # Type Parameters
 ///
-/// * `IdLen` - the length of the ID in bytes. This must be greater than
-///   `MAX_PREFIX_LEN + HmacLen + 4`.
-/// * `HmacLen` - the length of the HMAC inside the ID, in bytes
-/// * `MAX_PREFIX_LEN` - the maximum length of a prefix in binary bytes (not
-///   Base64 chars)
-/// * `METADATA_OFFSET` - the offset of the metadata from the beginning of the
-///   RandomBytes portion of the ID. This must be less than `IdLen - HmacLen - 4
-///   - MAX_PREFIX_LEN`. A safe value is 0.
-/// * `VERSION` - the version of your ID
-/// * `VERSION_BITS` - the amount of bits used to store your ID's version. This
-///   must be less than 7.
-/// * `EPOCH` - a constant reference point in `seconds since UNIX_EPOCH` that is
-///   used for the timestamp compression. This should be a timestamp in the
-///   recent past.
+/// - `IdLength`: The total length of the ID in bytes.
+/// - `MacLength`: The length of the HMAC token at the end of the ID in bytes.
+/// - `MAX_PREFIX_LEN`: The maximum length of any prefix before the ID data.
+///   This length is in bytes.
+/// - `VERSION_BITS`: The number of bits used to represent the version of the
+///   ID. This value must be less than 32 to fit within the constraints. The
+///   version is stored in Little Endian order.
+/// - `TIMESTAMP_BITS`: The number of bits used to encode the expiration
+///   timestamp of the ID. This value must be less than 57. The timestamp is
+///   stored in Little Endian order.
+/// - `TIMESTAMP_PRECISION_REDUCTION`: Specifies the reduction in timestamp
+///   precision. It is the number of least significant bits by which the
+///   timestamp value is right-shifted before being stored. This shift reduces
+///   the timestamp's precision but extends the maximum representable time. The
+///   decoded timestamp will always be between `2^(TIMESTAMP_PRECISION_REDUCTION
+///   - 1) + 1` and `2^(TIMESTAMP_PRECISION_REDUCTION) +
+///   2^(TIMESTAMP_PRECISION_REDUCTION - 1)` seconds greater than the input
+///   valued.
+///
+/// # Remarks
+/// The `BinaryId` struct allows for detailed control over the encoding of
+/// version and timestamp information within a binary ID format, offering a
+/// balance between precision and space efficiency. The
+/// `TIMESTAMP_PRECISION_REDUCTION` parameter, in particular, provides a
+/// mechanism to adjust the granularity of timestamp encoding to suit different
+/// time range and precision requirements.
 ///
 /// # Examples
 /// ```rust
@@ -125,53 +82,72 @@ const TIMESTAMP_BYTES: usize = 5;
 ///
 /// // creating a type alias for an ID
 /// type ClientId = BinaryId<
-///     U32,        // IdLen
-///     U4,         // HmacLen
+///     U32,        // IdLength
+///     U4,         // MacLength
 ///     6,          // MAX_PREFIX_LEN
-///     0,          // METADATA_OFFSET
-///     1,          // VERSION
 ///     3,          // VERSION_BITS
+///     24,         // TIMESTAMP_BITS
+///     8,          // TIMESTAMP_PRECISION_REDUCTION
 ///     1709349508, // EPOCH
 /// >;
 /// ```
 #[derive(Debug, Clone)]
 pub struct BinaryId<
-    IdLen: Unsigned + ArraySize,
-    HmacLen: Unsigned,
+    IdLength: Unsigned + ArraySize,
+    MacLength: Unsigned,
     const MAX_PREFIX_LEN: usize,
-    const METADATA_OFFSET: usize,
-    const VERSION: u8,
     const VERSION_BITS: u8,
+    const TIMESTAMP_BITS: u8,
+    const TIMESTAMP_PRECISION_REDUCTION: u8,
     const EPOCH: u64,
 > {
     /// A public id for this key
-    pub id: Array<u8, IdLen>,
-    _hmac_len: PhantomData<HmacLen>,
+    pub id: Array<u8, IdLength>,
+    _hmac_len: PhantomData<MacLength>,
 }
 
+/// Configuration info for IDs?
+///
+/// ```ignore
+/// pub struct IdConfig {
+///     version_bits: u8,
+///     hmac_len: u8,
+///     lossy_timestamp: bool,
+///     short_timestamp_range: bool,
+///     prefix_len: usize,
+///     epoch: u64,
+/// }
+/// ```
+
 impl<
-        IdLen: Unsigned + ArraySize,
-        HmacLen: Unsigned + ArraySize,
+        IdLength: Unsigned + ArraySize,
+        MacLength: Unsigned,
         const MAX_PREFIX_LEN: usize,
-        const METADATA_OFFSET: usize,
-        const VERSION: u8,
         const VERSION_BITS: u8,
+        const TIMESTAMP_BITS: u8,
+        const TIMESTAMP_PRECISION_REDUCTION: u8,
         const EPOCH: u64,
     > EncodedId
-    for BinaryId<IdLen, HmacLen, MAX_PREFIX_LEN, METADATA_OFFSET, VERSION, VERSION_BITS, EPOCH>
+    for BinaryId<
+        IdLength,
+        MacLength,
+        MAX_PREFIX_LEN,
+        VERSION_BITS,
+        TIMESTAMP_BITS,
+        TIMESTAMP_PRECISION_REDUCTION,
+        EPOCH,
+    >
 where
-    IdLen: Unsigned + ArraySize,
-    HmacLen: Unsigned + ArraySize,
+    IdLength: Unsigned + ArraySize,
+    MacLength: Unsigned,
 {
-    const HMAC_LENGTH: usize = HmacLen::USIZE;
-    const HMAC_START_INDEX: usize = IdLen::USIZE - HmacLen::USIZE;
-    const ID_LEN: usize = IdLen::USIZE;
-    const METADATA_IDX: usize = MAX_PREFIX_LEN + TIMESTAMP_BYTES + METADATA_OFFSET;
-    const VERSION: u8 = VERSION;
+    const HMAC_LENGTH: usize = MacLength::USIZE;
+    const HMAC_START_INDEX: usize = IdLength::USIZE - MacLength::USIZE;
+    const ID_LEN: usize = IdLength::USIZE;
+    const METADATA_IDX: usize = MAX_PREFIX_LEN;
     const MAX_PREFIX_LEN: usize = MAX_PREFIX_LEN;
-
-    type HmacBytes = Array<u8, HmacLen>;
-    type IdBytes = Array<u8, IdLen>;
+    type IdBytes = Array<u8, IdLength>;
+    const VERSION_BITS: u8 = VERSION_BITS;
 
     /// Generates an ID and encodes the "Info Byte", but does not compute the
     /// HMAC.
@@ -199,17 +175,18 @@ where
     /// `VERSION_BITS` bits to encode the version. The remaining bits will be
     /// pseudorandom.
     fn generate(
+        version: u32,
         prefix: &[u8],
         expire_time_seconds: Option<u64>,
         uses_accociated_data: bool,
         rng: &mut dyn RngCore,
     ) -> Self {
         debug_assert!(
-            VERSION_BITS <= 6,
-            "The Id can only handle VERSION_BITS less than 7."
+            VERSION_BITS <= 56,
+            "The Id can only handle VERSION_BITS between 0 <= VB <= 56."
         );
         debug_assert!(
-            VERSION < 1 << VERSION_BITS,
+            version < (1 << VERSION_BITS),
             "The Id's VERSION must be representable with VERSION_BITS bits."
         );
 
@@ -219,64 +196,79 @@ where
         rng.fill_bytes(&mut id[stream_start_idx..Self::HMAC_START_INDEX]);
 
         let is_expiring = expire_time_seconds.as_ref().is_some();
+
+        // fill the metadata byte that contains the bools first
+        let mut metadata_start = id[Self::METADATA_IDX];
+        let bits_in_use = 2;
+        metadata_start = metadata_start << bits_in_use;
+        metadata_start |= (is_expiring.as_u8() << 1) | uses_accociated_data.as_u8();
+        id[Self::METADATA_IDX] = metadata_start;
+
         if let Some(mut expiration) = expire_time_seconds {
-            #[cfg(feature = "lossy-timestamps")]
-            {
-                // if more than 128 seconds are chopped off with a right bit shift, we will add
-                // an extra 256 seconds to the expiration time. The 8th bit determines this
-                let eighth_bit = (expiration & 0b1000_0000) >> 7;
+            expiration -= EPOCH;
 
-                expiration = (expiration - EPOCH) >> 8;
+            if TIMESTAMP_PRECISION_REDUCTION > 0 {
+                // determine if right shifting by TIMESTAMP_PRECISION_REDUCTION removes a
+                // sizeable amount of time, then add some extra time
 
-                // This will add between 129-384 seconds to the provided expiration time based
-                // on how much time was removed with our bit shift. This is an insignificant
-                // amount of time and could be disregarded, and this extra time might be useful
-                // for legitimate requests that occur within seconds of the expiration passing.
-                expiration += 1 + eighth_bit;
-            }
-            #[cfg(not(feature = "lossy-timestamps"))]
-            {
-                expiration = expiration - EPOCH;
+                // to be exact, this checks if the time removed is greater than or equal to half
+                // of the maximum amount of time the removed value can hold by checking the next
+                // bit's value
+                let next_bit_idx = TIMESTAMP_PRECISION_REDUCTION - 1;
+                let next_high_bit = (expiration >> next_bit_idx) & 0b1;
+
+                expiration = (expiration >> TIMESTAMP_PRECISION_REDUCTION) + next_high_bit + 1
+            } else {
+                expiration += 1;
             }
 
-            id[MAX_PREFIX_LEN..MAX_PREFIX_LEN + TIMESTAMP_BYTES]
-                .copy_from_slice(&expiration.to_le_bytes()[..TIMESTAMP_BYTES]);
+            // insert version and timestamp into the ID
+            insert_ints_into_slice(
+                &[version as u64, expiration],
+                &mut id[Self::METADATA_IDX..],
+                &[VERSION_BITS, TIMESTAMP_BITS],
+                bits_in_use,
+            );
+        } else {
+            // insert version into ID
+            insert_ints_into_slice(
+                &[version as u64],
+                &mut id[Self::METADATA_IDX..],
+                &[VERSION_BITS],
+                bits_in_use,
+            );
         }
 
-        let mut metadata_byte = id[Self::METADATA_IDX];
-        metadata_byte = (metadata_byte << (2 + VERSION_BITS))
-            | (VERSION << 2)
-            | (is_expiring.as_u8() << 1)
-            | uses_accociated_data.as_u8();
-        id[Self::METADATA_IDX] = metadata_byte;
         Self {
             id,
             _hmac_len: PhantomData,
         }
     }
 
-    fn get_version(id: &[u8]) -> Result<u8, InvalidId> {
-        if id.len() < Self::METADATA_IDX {
+    fn get_version(id: &[u8]) -> Result<u32, InvalidId> {
+        if id.len()
+            < Self::METADATA_IDX
+                + ((VERSION_BITS + 2) >> 3) as usize
+                + ((VERSION_BITS + 2) & 0b111 > 0) as usize
+        {
             return Err(InvalidId::IncorrectLength);
         }
-        let result = id[Self::METADATA_IDX] >> 2;
-        Ok(result & ((1 << VERSION_BITS) - 1))
+
+        Ok(extract_ints_from_slice::<1>(&id[Self::METADATA_IDX..], &[VERSION_BITS], 2)[0] as u32)
     }
 
     fn get_expiration_time(&self) -> Option<u64> {
         if (&self.id[Self::METADATA_IDX] & 0b10) == 0 {
             return None;
         }
-        let mut arr = [0u8; 8];
-        arr[..TIMESTAMP_BYTES]
-            .copy_from_slice(&self.id[MAX_PREFIX_LEN..MAX_PREFIX_LEN + TIMESTAMP_BYTES]);
-        let mut expiration_s = u64::from_le_bytes(arr);
-        #[cfg(feature = "lossy-timestamps")]
-        {
-            expiration_s = expiration_s << 8;
-        }
-        expiration_s += EPOCH;
-        Some(expiration_s)
+
+        let [_, found_expiration] = extract_ints_from_slice::<2>(
+            &self.id[Self::METADATA_IDX..],
+            &[VERSION_BITS, TIMESTAMP_BITS],
+            2,
+        );
+
+        Some((found_expiration << TIMESTAMP_PRECISION_REDUCTION) + EPOCH)
     }
 
     fn validate_expiration_time(&self) -> Result<(), InvalidId> {
@@ -305,15 +297,23 @@ where
 }
 
 impl<
-        IdLen: Unsigned + ArraySize,
-        HmacLen: Unsigned,
+        IdLength: Unsigned + ArraySize,
+        MacLength: Unsigned,
         const MAX_PREFIX_LEN: usize,
-        const METADATA_OFFSET: usize,
-        const VERSION: u8,
         const VERSION_BITS: u8,
+        const TIMESTAMP_BITS: u8,
+        const TIMESTAMP_PRECISION_REDUCTION: u8,
         const EPOCH: u64,
     > AsRef<[u8]>
-    for BinaryId<IdLen, HmacLen, MAX_PREFIX_LEN, METADATA_OFFSET, VERSION, VERSION_BITS, EPOCH>
+    for BinaryId<
+        IdLength,
+        MacLength,
+        MAX_PREFIX_LEN,
+        VERSION_BITS,
+        TIMESTAMP_BITS,
+        TIMESTAMP_PRECISION_REDUCTION,
+        EPOCH,
+    >
 {
     fn as_ref(&self) -> &[u8] {
         &self.id
@@ -321,15 +321,23 @@ impl<
 }
 
 impl<
-        IdLen: Unsigned + ArraySize,
-        HmacLen: Unsigned,
+        IdLength: Unsigned + ArraySize,
+        MacLength: Unsigned,
         const MAX_PREFIX_LEN: usize,
-        const METADATA_OFFSET: usize,
-        const VERSION: u8,
         const VERSION_BITS: u8,
+        const TIMESTAMP_BITS: u8,
+        const TIMESTAMP_PRECISION_REDUCTION: u8,
         const EPOCH: u64,
     > Default
-    for BinaryId<IdLen, HmacLen, MAX_PREFIX_LEN, METADATA_OFFSET, VERSION, VERSION_BITS, EPOCH>
+    for BinaryId<
+        IdLength,
+        MacLength,
+        MAX_PREFIX_LEN,
+        VERSION_BITS,
+        TIMESTAMP_BITS,
+        TIMESTAMP_PRECISION_REDUCTION,
+        EPOCH,
+    >
 {
     fn default() -> Self {
         Self {
@@ -340,15 +348,23 @@ impl<
 }
 
 impl<
-        IdLen: Unsigned + ArraySize,
-        HmacLen: Unsigned,
+        IdLength: Unsigned + ArraySize,
+        MacLength: Unsigned,
         const MAX_PREFIX_LEN: usize,
-        const METADATA_OFFSET: usize,
-        const VERSION: u8,
         const VERSION_BITS: u8,
+        const TIMESTAMP_BITS: u8,
+        const TIMESTAMP_PRECISION_REDUCTION: u8,
         const EPOCH: u64,
     > AsMut<[u8]>
-    for BinaryId<IdLen, HmacLen, MAX_PREFIX_LEN, METADATA_OFFSET, VERSION, VERSION_BITS, EPOCH>
+    for BinaryId<
+        IdLength,
+        MacLength,
+        MAX_PREFIX_LEN,
+        VERSION_BITS,
+        TIMESTAMP_BITS,
+        TIMESTAMP_PRECISION_REDUCTION,
+        EPOCH,
+    >
 {
     fn as_mut(&mut self) -> &mut [u8] {
         self.id.as_mut_slice()
@@ -356,18 +372,26 @@ impl<
 }
 
 impl<
-        IdLen,
-        HmacLen,
+        IdLength,
+        MacLength,
         const MAX_PREFIX_LEN: usize,
-        const METADATA_OFFSET: usize,
-        const VERSION: u8,
         const VERSION_BITS: u8,
+        const TIMESTAMP_BITS: u8,
+        const TIMESTAMP_PRECISION_REDUCTION: u8,
         const EPOCH: u64,
     > TryFrom<&[u8]>
-    for BinaryId<IdLen, HmacLen, MAX_PREFIX_LEN, METADATA_OFFSET, VERSION, VERSION_BITS, EPOCH>
+    for BinaryId<
+        IdLength,
+        MacLength,
+        MAX_PREFIX_LEN,
+        VERSION_BITS,
+        TIMESTAMP_BITS,
+        TIMESTAMP_PRECISION_REDUCTION,
+        EPOCH,
+    >
 where
-    IdLen: Unsigned + ArraySize,
-    HmacLen: Unsigned + ArraySize,
+    IdLength: Unsigned + ArraySize,
+    MacLength: Unsigned,
 {
     type Error = InvalidId;
 
@@ -375,15 +399,12 @@ where
     /// reported "version". This should be combined with checking the HMAC, as
     /// well as the expiration time.
     fn try_from(id_slice: &[u8]) -> Result<Self, Self::Error> {
-        if id_slice.len() != IdLen::USIZE {
-            let b64_len = IdLen::USIZE * 4 / 3;
+        if id_slice.len() != IdLength::USIZE {
+            let b64_len = IdLength::USIZE * 4 / 3;
             if id_slice.len() >= b64_len && id_slice.len() < b64_len + 4 {
                 return Err(Self::Error::PossiblyInBase64);
             }
             return Err(Self::Error::IncorrectLength);
-        }
-        if VERSION != <Self as EncodedId>::get_version(id_slice)? {
-            return Err(Self::Error::IncorrectVersion);
         }
 
         let mut id = <Self as EncodedId>::IdBytes::default();
@@ -409,11 +430,13 @@ mod tests {
     const TEST_EPOCH: u64 = 1709349508;
     const VERSION_BITS: u8 = 3;
     const PREFIX_LEN: usize = 6;
-    const METADATA_OFFSET: usize = 0;
+
+    const TIMESTAMP_BITS: u8 = 24;
+    const TIMESTAMP_PRECISION_REDUCTION: u8 = 8;
 
     macro_rules! generate_id {
-        ($Ty:ty, $rng:expr) => {
-            <$Ty>::generate(&[], None, true, &mut $rng)
+        ($Ty:ty, $rng:expr, $version:expr) => {
+            <$Ty>::generate($version, &[], None, true, &mut $rng)
         };
     }
 
@@ -422,21 +445,42 @@ mod tests {
     /// `2^VERSION_BITS - 1` do not work properly.
     #[test]
     fn version_encoding() {
-        type IdVersion1 =
-            BinaryId<U48, U5, PREFIX_LEN, METADATA_OFFSET, 1, VERSION_BITS, TEST_EPOCH>;
-        type IdVersion2 =
-            BinaryId<U48, U5, PREFIX_LEN, METADATA_OFFSET, 2, VERSION_BITS, TEST_EPOCH>;
-        type IdVersion7 =
-            BinaryId<U48, U5, PREFIX_LEN, METADATA_OFFSET, 7, VERSION_BITS, TEST_EPOCH>;
+        type IdVersion1 = BinaryId<
+            U48,
+            U5,
+            PREFIX_LEN,
+            VERSION_BITS,
+            TIMESTAMP_BITS,
+            TIMESTAMP_PRECISION_REDUCTION,
+            TEST_EPOCH,
+        >;
+        type IdVersion2 = BinaryId<
+            U48,
+            U5,
+            PREFIX_LEN,
+            VERSION_BITS,
+            TIMESTAMP_BITS,
+            TIMESTAMP_PRECISION_REDUCTION,
+            TEST_EPOCH,
+        >;
+        type IdVersion7 = BinaryId<
+            U48,
+            U5,
+            PREFIX_LEN,
+            VERSION_BITS,
+            TIMESTAMP_BITS,
+            TIMESTAMP_PRECISION_REDUCTION,
+            TEST_EPOCH,
+        >;
 
         // The same Version is used to check the version because they all use the same
         // `METADATA_OFFSET`. If these used different values for that, then this test
         // would not work correctly
-        let id_v1 = generate_id!(IdVersion1, &mut OsRng);
+        let id_v1 = generate_id!(IdVersion1, &mut OsRng, 1);
         assert_eq!(IdVersion1::get_version(id_v1.as_ref()).unwrap(), 1);
-        let id_v2 = generate_id!(IdVersion2, &mut OsRng);
+        let id_v2 = generate_id!(IdVersion2, &mut OsRng, 2);
         assert_eq!(IdVersion1::get_version(id_v2.as_ref()).unwrap(), 2);
-        let id_v7 = generate_id!(IdVersion7, &mut OsRng);
+        let id_v7 = generate_id!(IdVersion7, &mut OsRng, 7);
         assert_eq!(IdVersion1::get_version(id_v7.as_ref()).unwrap(), 7);
     }
 
@@ -445,10 +489,17 @@ mod tests {
     #[test]
     #[should_panic]
     fn version_too_large() {
-        type IdVersion8 =
-            BinaryId<U48, U5, PREFIX_LEN, METADATA_OFFSET, 8, VERSION_BITS, TEST_EPOCH>;
+        type IdVersion8 = BinaryId<
+            U48,
+            U5,
+            PREFIX_LEN,
+            VERSION_BITS,
+            TIMESTAMP_BITS,
+            TIMESTAMP_PRECISION_REDUCTION,
+            TEST_EPOCH,
+        >;
 
-        let id_v8 = generate_id!(IdVersion8, OsRng);
+        let id_v8 = generate_id!(IdVersion8, OsRng, 8);
         assert_ne!(IdVersion8::get_version(id_v8.as_ref()).unwrap(), 8);
     }
 
@@ -456,66 +507,57 @@ mod tests {
     /// that the timestamp is slightly greater than the input time by a few
     /// minutes.
     #[test]
-    fn timestamp_encoding() {
-        type IdVersion1 =
-            BinaryId<U48, U5, PREFIX_LEN, METADATA_OFFSET, 1, VERSION_BITS, TEST_EPOCH>;
-        let input_time = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+    fn fuzz_timestamp_encoding() {
+        /// Creates an ID type where `precison_reduction` bits are lost during
+        /// timestamp compression, and tests whether the decoded expiration time
+        /// was in the expected range
+        macro_rules! test_id_with_loss_factor {
+            ($($precison_reduction:literal), *) => {
+                $(
+                    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+                    for t in 0..(1 << $precison_reduction) {
+                        let input_expiration_time = t + now;
+                        let expiring_id = BinaryId::<U48, U5, PREFIX_LEN, VERSION_BITS, TIMESTAMP_BITS, $precison_reduction, TEST_EPOCH>::generate(1, &[], Some(input_expiration_time), false, &mut OsRng);
 
-        // the timestamp in the ID will be roughly between `input_time + 128` and
-        // `input_time + 384`
-        let maximum_accepted_expiration_time = input_time + 600;
-        let id_with_expiration = IdVersion1::generate(&[], Some(input_time), false, &mut OsRng);
+                        let minimum_added_time = if $precison_reduction > 0 {
+                            (1 << ($precison_reduction - 1)) + 1
+                        } else {
+                            1
+                        };
+                        let maximum_added_time = (1 << $precison_reduction) + minimum_added_time - 1;
 
-        let expiration_time = id_with_expiration.get_expiration_time();
-
-        #[cfg(feature = "lossy-timestamps")]
-        if let Some(expiration) = expiration_time {
-            assert!(
-                expiration > input_time,
-                "The expiration time {expiration} was less than the input expiration timestamp \
-                 {input_time}"
-            );
-            assert!(
-                expiration < maximum_accepted_expiration_time,
-                "The expiration time ({expiration}) was larger than the accepted maximum \
-                 expiration time ({maximum_accepted_expiration_time})"
-            );
-        } else {
-            assert!(
-                false,
-                "The signal bit in the info byte did not properly indicate that the ID uses a \
-                 timestamp"
-            );
-        }
-        #[cfg(not(feature = "lossy-timestamps"))]
-        if let Some(expiration) = expiration_time {
-            assert_eq!(expiration, input_time);
+                        if let Some(mut decoded_expiration_time) = expiring_id.get_expiration_time() {
+                            decoded_expiration_time -= input_expiration_time;
+                            assert!(decoded_expiration_time >= minimum_added_time, "The expiration time was smaller than it was supposed to be.\ninput_expiration = {}\ndecoded_expiration_time = {}\nprecison_reduction = {}", input_expiration_time, decoded_expiration_time, $precison_reduction);
+                            assert!(decoded_expiration_time <= maximum_added_time, "The expiration time exceeds how large it was supposed to be\ninput_expiration = {}\ndecoded_expiration_time = {}\nprecison_reduction = {}", input_expiration_time, decoded_expiration_time, $precison_reduction);
+                        } else {
+                            assert!(false, "Expiration not found in the ID")
+                        }
+                    }
+                )*
+            };
         }
 
-        let id_without_expiration = IdVersion1::generate(&[], None, false, &mut OsRng);
-
-        let expiration_time = id_without_expiration.get_expiration_time();
-
-        assert!(
-            expiration_time.is_none(),
-            "The signal bit in the info byte incorrectly specified that there is an expiration \
-             time in the ID."
-        );
+        test_id_with_loss_factor!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13);
     }
 
     /// This test ensures that the signal bit indicating that there's associated
     /// data is correctly set.
     #[test]
     fn uses_associated_data() {
-        type IdVersion1 =
-            BinaryId<U48, U5, PREFIX_LEN, METADATA_OFFSET, 1, VERSION_BITS, TEST_EPOCH>;
+        type IdVersion1 = BinaryId<
+            U48,
+            U5,
+            PREFIX_LEN,
+            VERSION_BITS,
+            TIMESTAMP_BITS,
+            TIMESTAMP_PRECISION_REDUCTION,
+            TEST_EPOCH,
+        >;
 
-        let id_with_associated_data = IdVersion1::generate(&[], None, true, &mut OsRng);
+        let id_with_associated_data = IdVersion1::generate(1, &[], None, true, &mut OsRng);
 
-        let id_without_associated_data = IdVersion1::generate(&[], None, false, &mut OsRng);
+        let id_without_associated_data = IdVersion1::generate(1, &[], None, false, &mut OsRng);
 
         assert!(
             id_with_associated_data.uses_associated_data(),
@@ -526,5 +568,24 @@ mod tests {
             !id_without_associated_data.uses_associated_data(),
             "The signal bit incorrectly indicated that the ID needed some associated data"
         );
+    }
+
+    #[test]
+    fn testing_version_encoding_and_decoding() {
+        type HighVersionIds =
+            BinaryId<U48, U5, 6, 27, TIMESTAMP_BITS, TIMESTAMP_PRECISION_REDUCTION, TEST_EPOCH>;
+
+        for i in 0..27 {
+            let mut test_version: u32 = 1 << i;
+            test_version = test_version.saturating_sub(1);
+
+            let new_id =
+                HighVersionIds::generate(test_version, b"does it work", None, false, &mut OsRng);
+
+            assert_eq!(
+                HighVersionIds::get_version(new_id.as_ref()).unwrap(),
+                test_version
+            );
+        }
     }
 }

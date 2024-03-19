@@ -35,20 +35,17 @@ pub trait EncodedId:
     const HMAC_LENGTH: usize;
     /// The HMAC start index.
     const HMAC_START_INDEX: usize;
-    /// The version of this ID
-    const VERSION: u8;
     /// The maximum prefix length for this ID
     const MAX_PREFIX_LEN: usize;
+    /// The amount of bits used to store the ID's version
+    const VERSION_BITS: u8;
 
     /// The ID type, used for initializing an empty ID array
     type IdBytes: AsRef<[u8]> + AsMut<[u8]>;
 
-    /// The HMAC byte array type, used for initializing an empty HMAC array for
-    /// validation of a given ID.
-    type HmacBytes: AsRef<[u8]> + AsMut<[u8]> + Default;
-
     /// A function that generates a pseudorandom ID, with an empty HMAC.
     fn generate(
+        version: u32,
         prefix: &[u8],
         expire_time: Option<u64>,
         uses_associated_data: bool,
@@ -65,7 +62,7 @@ pub trait EncodedId:
     ///
     /// This method will only return an error if the id's length is smaller than
     /// `METADATA_IDX`.
-    fn get_version(id: &[u8]) -> Result<u8, InvalidId>;
+    fn get_version(id: &[u8]) -> Result<u32, InvalidId>;
 
     /// Checks if the ID is meant to expire, and returns the expiration time if
     /// it does.
@@ -182,6 +179,7 @@ pub trait CryptoKeyGenerator: Sized {
     ///   bytes in the ID
     fn generate_keyless_id<Id>(
         &mut self,
+        version: u32,
         prefix: &[u8],
         id_type: &[u8],
         expiration: Option<u64>,
@@ -227,6 +225,7 @@ pub trait CryptoKeyGenerator: Sized {
     ///   bytes in the ID
     fn generate_ecdsa_key_and_id<C, Id>(
         &mut self,
+        version: u32,
         prefix: &[u8],
         expiration: Option<u64>,
         associated_data: Option<&[u8]>,
@@ -317,6 +316,7 @@ pub trait CryptoKeyGenerator: Sized {
     /// `FieldBytesSize` is ridiculously large.
     fn generate_ecdh_pubkey_and_id<C, Id>(
         &mut self,
+        version: u32,
         prefix: &[u8],
         expiration: Option<u64>,
         associated_data: Option<&[u8]>,

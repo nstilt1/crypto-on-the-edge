@@ -172,6 +172,7 @@ where
 
     fn generate_keyless_id<Id>(
         &mut self,
+        version: u32,
         prefix: &[u8],
         id_type: &[u8],
         expiration: Option<u64>,
@@ -181,7 +182,7 @@ where
     where
         Id: EncodedId,
     {
-        let mut id = Id::generate(prefix, expiration, associated_data.is_some(), rng);
+        let mut id = Id::generate(version, prefix, expiration, associated_data.is_some(), rng);
         self.fill_id_hmac(&mut id, id_type, associated_data);
         id
     }
@@ -218,6 +219,7 @@ where
 
     fn generate_ecdsa_key_and_id<C, Id>(
         &mut self,
+        version: u32,
         prefix: &[u8],
         expiration: Option<u64>,
         associated_data: Option<&[u8]>,
@@ -229,7 +231,13 @@ where
         SignatureSize<C>: ArraySize,
         Id: EncodedId,
     {
-        let mut id = Id::generate(prefix, expiration, associated_data.as_ref().is_some(), rng);
+        let mut id = Id::generate(
+            version,
+            prefix,
+            expiration,
+            associated_data.as_ref().is_some(),
+            rng,
+        );
         self.fill_id_hmac(&mut id, b"ecdsa", associated_data);
 
         let additional_info = if let Some(info) = associated_data {
@@ -348,6 +356,7 @@ where
 
     fn generate_ecdh_pubkey_and_id<C, Id>(
         &mut self,
+        version: u32,
         prefix: &[u8],
         expiration: Option<u64>,
         associated_data: Option<&[u8]>,
@@ -359,7 +368,13 @@ where
         AffinePoint<C>: FromEncodedPoint<C> + ToEncodedPoint<C>,
         Id: EncodedId,
     {
-        let mut id = Id::generate(prefix, expiration, associated_data.as_ref().is_some(), rng);
+        let mut id = Id::generate(
+            version,
+            prefix,
+            expiration,
+            associated_data.as_ref().is_some(),
+            rng,
+        );
         self.fill_id_hmac(&mut id, b"ecdh", associated_data);
 
         let additional_info = if let Some(info) = associated_data {
@@ -507,7 +522,7 @@ mod tests {
 
     const MAX_PREFIX_LEN: usize = 6;
 
-    type TestId = BinaryId<U48, U5, MAX_PREFIX_LEN, 0, 1, 3, 1709349508>;
+    type TestId = BinaryId<U48, U5, MAX_PREFIX_LEN, 3, 24, 8, 1709349508>;
     type Sha2KeyGenerator = KeyGenerator<Hmac<Sha256>, Sha256>;
 
     const TEST_HMAC_KEY: [u8; 32] = [42u8; 32];
@@ -546,6 +561,7 @@ mod tests {
             let original_associated_data = b"providing additional data for the id generation requires providing the same data during validation. This is useful for when only a specific client should be using a specific Key ID, and it also affects the actual value of the private key associated with Key IDs (although that aspect does not apply to keyless IDs).";
 
             let id = key_generator.generate_keyless_id::<TestId>(
+                1,
                 &[],
                 TEST_ID_TYPE,
                 None,
@@ -590,8 +606,14 @@ mod tests {
         fn keyless_id_without_associated_data() {
             let mut key_generator = init_keygenerator!();
 
-            let id_without_associated_data =
-                key_generator.generate_keyless_id::<TestId>(&[], b"test", None, None, &mut rng!());
+            let id_without_associated_data = key_generator.generate_keyless_id::<TestId>(
+                1,
+                &[],
+                b"test",
+                None,
+                None,
+                &mut rng!(),
+            );
 
             // providing associated data when the ID was not generated with associated data
             // is safe
@@ -605,6 +627,7 @@ mod tests {
             let mut key_generator = init_keygenerator!();
 
             let id_type_1 = key_generator.generate_keyless_id::<TestId>(
+                1,
                 &[],
                 b"client_ID",
                 None,
@@ -630,6 +653,7 @@ mod tests {
             let mut key_generator = init_keygenerator!();
 
             let id = key_generator.generate_keyless_id::<TestId>(
+                1,
                 &[],
                 TEST_ID_TYPE,
                 None,
@@ -673,6 +697,7 @@ mod tests {
         let test_prefix = [1, 2, 3, 4, 5, 6, 7, 8, 9];
 
         let id = key_generator.generate_keyless_id::<TestId>(
+            1,
             &test_prefix,
             TEST_ID_TYPE,
             None,
