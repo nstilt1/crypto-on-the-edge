@@ -16,7 +16,9 @@ use hkdf::hmac::{
     },
     Mac,
 };
+use rand_chacha::{rand_core::SeedableRng, ChaCha12Rng, ChaCha20Rng, ChaCha8Rng};
 use subtle::CtOption;
+use zeroize::Zeroize;
 
 /// A trait for encoded IDs.
 ///
@@ -27,8 +29,6 @@ use subtle::CtOption;
 pub trait EncodedId:
     AsRef<[u8]> + AsMut<[u8]> + for<'a> TryFrom<&'a [u8], Error = InvalidId> + Default
 {
-    /// The length of the ID in bytes
-    const ID_LEN: usize;
     /// The metadata start index
     const METADATA_IDX: usize;
     /// The length of the HMAC within the ID in bytes.
@@ -39,18 +39,19 @@ pub trait EncodedId:
     const MAX_PREFIX_LEN: usize;
     /// The amount of bits used to store the ID's version
     const VERSION_BITS: u8;
+    /// The amount of bits used to store the ID's expiration timestamp
+    const TIMESTAMP_BITS: u8;
 
     /// The ID type, used for initializing an empty ID array
-    type IdBytes: AsRef<[u8]> + AsMut<[u8]>;
+    type IdLen: ArraySize;
 
     /// A function that generates a pseudorandom ID, with an empty HMAC.
     fn generate(
-        version: u32,
         prefix: &[u8],
         expire_time: Option<u64>,
         uses_associated_data: bool,
         rng: &mut dyn RngCore,
-    ) -> Self;
+    ) -> (Self, Option<u64>);
 
     /// This method attempts to get the "version" of a given Id byte slice.
     ///
@@ -75,13 +76,49 @@ pub trait EncodedId:
     /// and you are able to get the seconds since EPOCH, you could still use
     /// `get_expiration_time()` to manually check the expiration, or you could
     /// refrain from using expiring key IDs.
-    fn validate_expiration_time(&self) -> Result<(), InvalidId>;
+    fn validate_expiration_time(&self, expire_time: Option<u64>) -> Result<(), InvalidId>;
 
     /// Checks the "info byte" to see if the HMAC should be computed using any
     /// additional associated data. This could include a "client id" for when
     /// only a specific client should use the ID.
     fn uses_associated_data(&self) -> bool;
 }
+
+/// The methods for RNGs allowed for generating version nonces/salts.
+///
+/// The primary requirement is that it is cryptographically secure, and that it
+/// can be seeded, and that it can use a nonce.
+pub trait AllowedRngs {
+    type Seed: Zeroize;
+
+    /// Initializes an Rng and zeroizes the seed
+    fn init_rng(seed: &mut Self::Seed) -> Self;
+
+    /// Outputs the salt used for a specific version
+    fn get_version_salt(&mut self, version: u32, output_salt: &mut [u8]);
+}
+
+macro_rules! allow_chacha_rng {
+    ($($Rng:ident),*) => {
+        $(impl AllowedRngs for $Rng {
+            type Seed = [u8; 32];
+
+            fn init_rng(seed: &mut Self::Seed) -> Self {
+                let rng = $Rng::from_seed(*seed);
+                seed.zeroize();
+                rng
+            }
+
+            fn get_version_salt(&mut self, version: u32, output_salt: &mut [u8]) {
+                self.set_stream(version as u64);
+                self.set_word_pos(0);
+                self.fill_bytes(output_salt)
+            }
+        })*
+    };
+}
+
+allow_chacha_rng!(ChaCha8Rng, ChaCha12Rng, ChaCha20Rng);
 
 /// Defines some methods for the `KeyGenerator` so that this can be used in
 /// another library.
@@ -92,12 +129,20 @@ pub trait CryptoKeyGenerator: Sized {
     /// The Mac used for generating and validating IDs
     type Mac: Mac;
 
+    /// The RNG used for generating version salts/nonces.
+    type Rng: AllowedRngs;
+
     /// A convenience method for [extract()](CryptoKeyGenerator::extract) that
     /// discards the PRK value.
     ///
     /// See [Hkdf::new()](hkdf::Hkdf::new).
-    fn new(hkdf_key: &[u8], application_id: &[u8], mac: Self::Mac) -> Self {
-        let (_, hkdf) = Self::extract(hkdf_key, application_id, mac);
+    fn new(
+        hkdf_key: &[u8],
+        application_id: &[u8],
+        mac: Self::Mac,
+        rng_seed: &mut <Self::Rng as AllowedRngs>::Seed,
+    ) -> Self {
+        let (_, hkdf) = Self::extract(hkdf_key, application_id, mac, rng_seed);
         hkdf
     }
 
@@ -138,6 +183,7 @@ pub trait CryptoKeyGenerator: Sized {
         hkdf_key: &[u8],
         application_id: &[u8],
         mac: Self::Mac,
+        rng_seed: &mut <Self::Rng as AllowedRngs>::Seed,
     ) -> (
         Array<u8, <Self::HkdfDigest as OutputSizeUser>::OutputSize>,
         Self,
@@ -158,7 +204,11 @@ pub trait CryptoKeyGenerator: Sized {
     /// # Panics
     /// This panics when the `prk`'s length is less than the output size of the
     /// hash function.
-    fn from_prk(prk: &[u8], mac: Self::Mac) -> Self;
+    fn from_prk(
+        prk: &[u8],
+        mac: Self::Mac,
+        rng_seed: &mut <Self::Rng as AllowedRngs>::Seed,
+    ) -> Self;
 
     /// Generates an ID that is not explicitly used for generating a private
     /// key.
@@ -179,7 +229,6 @@ pub trait CryptoKeyGenerator: Sized {
     ///   bytes in the ID
     fn generate_keyless_id<Id>(
         &mut self,
-        version: u32,
         prefix: &[u8],
         id_type: &[u8],
         expiration: Option<u64>,
@@ -225,7 +274,6 @@ pub trait CryptoKeyGenerator: Sized {
     ///   bytes in the ID
     fn generate_ecdsa_key_and_id<C, Id>(
         &mut self,
-        version: u32,
         prefix: &[u8],
         expiration: Option<u64>,
         associated_data: Option<&[u8]>,
@@ -316,7 +364,6 @@ pub trait CryptoKeyGenerator: Sized {
     /// `FieldBytesSize` is ridiculously large.
     fn generate_ecdh_pubkey_and_id<C, Id>(
         &mut self,
-        version: u32,
         prefix: &[u8],
         expiration: Option<u64>,
         associated_data: Option<&[u8]>,

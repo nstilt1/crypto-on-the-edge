@@ -37,6 +37,9 @@ use crate::{
 };
 use crate::{traits::EncodedId, utils::BoolMath};
 
+/// The amount of bits being used for bools by this ID in the metadata byte
+pub(crate) const BITS_IN_USE: u8 = 2;
+
 /// Represents a Binary ID structure with configurable parameters for size,
 /// versioning, and expiration encoding.
 ///
@@ -143,11 +146,11 @@ where
 {
     const HMAC_LENGTH: usize = MacLength::USIZE;
     const HMAC_START_INDEX: usize = IdLength::USIZE - MacLength::USIZE;
-    const ID_LEN: usize = IdLength::USIZE;
     const METADATA_IDX: usize = MAX_PREFIX_LEN;
     const MAX_PREFIX_LEN: usize = MAX_PREFIX_LEN;
-    type IdBytes = Array<u8, IdLength>;
+    type IdLen = IdLength;
     const VERSION_BITS: u8 = VERSION_BITS;
+    const TIMESTAMP_BITS: u8 = TIMESTAMP_BITS;
 
     /// Generates an ID and encodes the "Info Byte", but does not compute the
     /// HMAC.
@@ -175,22 +178,17 @@ where
     /// `VERSION_BITS` bits to encode the version. The remaining bits will be
     /// pseudorandom.
     fn generate(
-        version: u32,
         prefix: &[u8],
         expire_time_seconds: Option<u64>,
         uses_accociated_data: bool,
         rng: &mut dyn RngCore,
-    ) -> Self {
+    ) -> (Self, Option<u64>) {
         debug_assert!(
             VERSION_BITS <= 56,
             "The Id can only handle VERSION_BITS between 0 <= VB <= 56."
         );
-        debug_assert!(
-            version < (1 << VERSION_BITS),
-            "The Id's VERSION must be representable with VERSION_BITS bits."
-        );
 
-        let mut id = Self::IdBytes::default();
+        let mut id: Array<u8, IdLength> = Default::default();
         let stream_start_idx: usize = min(prefix.len(), MAX_PREFIX_LEN);
         id[..stream_start_idx].copy_from_slice(&prefix[..stream_start_idx]);
         rng.fill_bytes(&mut id[stream_start_idx..Self::HMAC_START_INDEX]);
@@ -199,8 +197,8 @@ where
 
         // fill the metadata byte that contains the bools first
         let mut metadata_start = id[Self::METADATA_IDX];
-        let bits_in_use = 2;
-        metadata_start = metadata_start << bits_in_use;
+
+        metadata_start = metadata_start << BITS_IN_USE;
         metadata_start |= (is_expiring.as_u8() << 1) | uses_accociated_data.as_u8();
         id[Self::METADATA_IDX] = metadata_start;
 
@@ -222,26 +220,36 @@ where
                 expiration += 1;
             }
 
-            // insert version and timestamp into the ID
+            // insert 0s as placeholder into timestamp area
             insert_ints_into_slice(
-                &[version as u64, expiration],
+                &[0, 0],
                 &mut id[Self::METADATA_IDX..],
                 &[VERSION_BITS, TIMESTAMP_BITS],
-                bits_in_use,
+                BITS_IN_USE,
             );
+
+            (
+                Self {
+                    id,
+                    _hmac_len: PhantomData,
+                },
+                Some(expiration),
+            )
         } else {
-            // insert version into ID
+            // insert 0s as placeholder into version area
             insert_ints_into_slice(
-                &[version as u64],
+                &[0],
                 &mut id[Self::METADATA_IDX..],
                 &[VERSION_BITS],
-                bits_in_use,
+                BITS_IN_USE,
             );
-        }
-
-        Self {
-            id,
-            _hmac_len: PhantomData,
+            (
+                Self {
+                    id,
+                    _hmac_len: PhantomData,
+                },
+                None,
+            )
         }
     }
 
@@ -271,12 +279,12 @@ where
         Some((found_expiration << TIMESTAMP_PRECISION_REDUCTION) + EPOCH)
     }
 
-    fn validate_expiration_time(&self) -> Result<(), InvalidId> {
+    fn validate_expiration_time(&self, expire_time: Option<u64>) -> Result<(), InvalidId> {
         #[cfg(not(feature = "std"))]
         return Ok(());
 
         #[cfg(feature = "std")]
-        if let Some(expiration_time) = self.get_expiration_time() {
+        if let Some(expiration_time) = expire_time {
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -407,7 +415,7 @@ where
             return Err(Self::Error::IncorrectLength);
         }
 
-        let mut id = <Self as EncodedId>::IdBytes::default();
+        let mut id: Array<u8, IdLength> = Default::default();
         id.copy_from_slice(&id_slice);
 
         Ok(Self {
@@ -435,14 +443,19 @@ mod tests {
     const TIMESTAMP_PRECISION_REDUCTION: u8 = 8;
 
     macro_rules! generate_id {
-        ($Ty:ty, $rng:expr, $version:expr) => {
-            <$Ty>::generate($version, &[], None, true, &mut $rng)
+        ($Ty:ty, $rng:expr) => {
+            <$Ty>::generate(&[], None, true, &mut $rng)
         };
     }
 
     /// Tests the `get_version` method to make sure it returns the right
     /// version. Notice that trying to use versions that are greater than
     /// `2^VERSION_BITS - 1` do not work properly.
+    ///
+    /// The versioning has changed pretty significantly since I've begun working
+    /// on #7, and now the only way it can be tested is by using the
+    /// `VersioningConfig`. I will go ahead and commit some changes before
+    /// removing the `const EPOCH` in the BinaryId.
     #[test]
     fn version_encoding() {
         type IdVersion1 = BinaryId<
@@ -476,11 +489,11 @@ mod tests {
         // The same Version is used to check the version because they all use the same
         // `METADATA_OFFSET`. If these used different values for that, then this test
         // would not work correctly
-        let id_v1 = generate_id!(IdVersion1, &mut OsRng, 1);
+        let id_v1 = generate_id!(IdVersion1, &mut OsRng);
         assert_eq!(IdVersion1::get_version(id_v1.as_ref()).unwrap(), 1);
-        let id_v2 = generate_id!(IdVersion2, &mut OsRng, 2);
+        let id_v2 = generate_id!(IdVersion2, &mut OsRng);
         assert_eq!(IdVersion1::get_version(id_v2.as_ref()).unwrap(), 2);
-        let id_v7 = generate_id!(IdVersion7, &mut OsRng, 7);
+        let id_v7 = generate_id!(IdVersion7, &mut OsRng);
         assert_eq!(IdVersion1::get_version(id_v7.as_ref()).unwrap(), 7);
     }
 
@@ -499,7 +512,7 @@ mod tests {
             TEST_EPOCH,
         >;
 
-        let id_v8 = generate_id!(IdVersion8, OsRng, 8);
+        let id_v8 = generate_id!(IdVersion8, OsRng);
         assert_ne!(IdVersion8::get_version(id_v8.as_ref()).unwrap(), 8);
     }
 

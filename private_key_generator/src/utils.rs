@@ -32,11 +32,16 @@ macro_rules! byte_mask {
     };
 }
 
-/// Creates a mask that is (2^pow) - 1, equating to a number that has `8 - pow`
+/// Creates a mask that is (2^pow) - 1, equating to a number that has `64 - pow`
 /// leading 0s followed by ones.
 ///
+/// While this is called "u64_mask", it can output a u32 as well, and it can
+/// probably output other types. The main reason it is different from
+/// `byte_mask` is that `byte_mask` is explicitly a `u8`.
+///
 /// # Panics
-/// This panics if `$pow` is greater than 8.
+/// This panics if `$pow` is greater than 64.
+#[macro_export]
 macro_rules! u64_mask {
     ($pow:expr) => {
         (1 << $pow) - 1
@@ -168,7 +173,7 @@ fn extract_int_v2(src: &[u8], num_bits_to_extract: u8, mut lower_bits_used: u8) 
 /// insert_ints_into_slice(&[a, b], &mut dest_slice[3..], &[22, 38], 0);
 ///
 /// // as long as `a` can be represented with 22 bits, and `b` can be represented with 38 bits, the numbers can be extracted:
-/// let extracted_numbers = extract_ints_from_slice::<2>(&dest_slice, &[22, 38], 0);
+/// let extracted_numbers = extract_ints_from_slice::<2>(&dest_slice[3..], &[22, 38], 0);
 ///
 /// assert_eq!(extracted_numbers[0], a);
 /// assert_eq!(extracted_numbers[1], b);

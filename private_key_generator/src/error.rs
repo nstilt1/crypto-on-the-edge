@@ -21,9 +21,12 @@ pub enum InvalidId {
     /// implementations may vary, this library does not automatically decode IDs
     /// from Base64. You will need to decode the ID to binary.
     PossiblyInBase64,
-    /// The version embedded in the ID byte slice was not the same version
-    /// associated with your `BinaryId`'s `VERSION` value.
-    IncorrectVersion,
+    /// The version embedded in the ID byte slice was too large to be valid.
+    VersionTooLarge,
+    /// If `REQUIRE_EXPIRING_KEYS` is set to true, this error will be given if
+    /// the ID's version is smaller than the output of
+    /// `get_minimum_accepted_key_id_version()`
+    VersionOutOfDate,
     /// This error indicates that the expiration timestamp in the ID has passed
     /// or was invalid. This error only occurs with the `std` feature enabled
     /// due to the use of `SystemTime`.
@@ -63,7 +66,8 @@ impl core::fmt::Display for InvalidId {
                     "The ID's length was incorrect, but it was roughly the length of a \
                      Base64-encoded ID. You must decode it to binary before validating it"
                 }
-                Self::IncorrectVersion => "The ID's version was not correct",
+                Self::VersionTooLarge => "The ID's version was too large",
+                Self::VersionOutOfDate => "The ID's version is too old",
                 Self::Expired => "The ID has expired",
                 Self::IdExpectedAssociatedData => {
                     "This ID either needs to be validated using associated data, or it was forged."
