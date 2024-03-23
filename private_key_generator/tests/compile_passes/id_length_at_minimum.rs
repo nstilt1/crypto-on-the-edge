@@ -5,7 +5,7 @@ use rand::rngs::OsRng;
 use sha2::Sha256;
 
 type TestId = BinaryId<
-    U19, // IdLength: okay. Total length sums up to exactly 16 bytes...
+    U19, // IdLength: okay. Total length sums up to exactly 19 bytes...
          // BUT... there is no room for pseudorandom bytes, other than the prefix
     U5,  // MacLength: okay
     5,   // MAX_PREFIX_LEN: okay
