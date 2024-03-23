@@ -215,7 +215,7 @@ where
         // reject a request if the ClientID is longer than 2 times our ID length. If it
         // was originally encoded in base64, it wouldn't be much larger than 133% of the
         // length
-        if request.client_id.len() > CId::ID_LEN << 1 {
+        if request.client_id.len() > CId::IdLen::USIZE << 1 {
             return Err(ProtocolError::InvalidRequest);
         }
 

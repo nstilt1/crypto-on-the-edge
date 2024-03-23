@@ -124,5 +124,5 @@ mod utils;
 
 pub use error::InvalidId;
 pub use id::BinaryId;
-pub use key_generator::{KeyGenerator, SimpleKeyGenerator};
+pub use key_generator::{KeyGenerator, SimpleKeyGenerator, VersionConfig, VersioningConfig};
 pub use traits::{CryptoKeyGenerator, EncodedId};

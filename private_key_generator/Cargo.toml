@@ -30,10 +30,11 @@ subtle = "2"
 zeroize = "1"
 
 [dev-dependencies]
+blake2 = "0.11.0-pre.3"
 #p256 = { version = "0.14.0-pre.0" }
 rand = "0.8"
 sha2 = "0.11.0-pre.3"
-blake2 = "0.11.0-pre.3"
+trybuild = "1"
 
 [features]
 default = ["std"]
