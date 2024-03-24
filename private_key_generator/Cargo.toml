@@ -24,18 +24,18 @@ doctest = false # need to change this before publishing
 ecdsa = { version = "0.17.0-pre.5", features = ["signing"]}
 elliptic-curve = { version = "0.14.0-pre.5", features = ["ecdh", "jwk"] }
 hkdf = "=0.13.0-pre.3"
+rand_chacha = { version = "0.3" }
 rand_core = "0.6"
 subtle = "2"
 zeroize = "1"
 
 [dev-dependencies]
+blake2 = "0.11.0-pre.3"
 #p256 = { version = "0.14.0-pre.0" }
 rand = "0.8"
 sha2 = "0.11.0-pre.3"
-blake2 = "0.11.0-pre.3"
+trybuild = "1"
 
 [features]
-default = ["long-timestamp-timespan", "std"]
-long-timestamp-timespan = [] # expiration times increase to 34,841 years from EPOCH, instead of only 136 years
-lossy-timestamps = [] # expiration timestamps are a byte shorter, and they will be 129-384 seconds larger than the input
+default = ["std"]
 std = ["hkdf/std"] # std is required for checking timestamps against UNIX_EPOCH

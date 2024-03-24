@@ -1,4 +1,4 @@
-use key_manager::{private_key_generator::{self, CryptoKeyGenerator}, HttpPrivateKeyManager};
+use http_private_key_manager::{private_key_generator::{self, CryptoKeyGenerator}, HttpPrivateKeyManager};
 use private_key_generator::{BinaryId, KeyGenerator};
 use base64::{alphabet::Alphabet, engine::{general_purpose::NO_PAD, GeneralPurpose}};
 use secrecy::Secret;
