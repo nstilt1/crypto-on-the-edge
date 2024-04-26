@@ -101,6 +101,7 @@
 //! any information about the private key generation.
 
 #![no_std]
+#![feature(generic_const_exprs)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![forbid(unsafe_code)]
 #![warn(missing_docs, rust_2018_idioms)]
@@ -118,11 +119,22 @@ pub use hkdf;
 mod id;
 mod key_generator;
 
-mod error;
+pub mod error;
 mod traits;
 mod utils;
 
 pub use error::InvalidId;
+pub use id::timestamp_policies;
 pub use id::BinaryId;
 pub use key_generator::{KeyGenerator, SimpleKeyGenerator, VersionConfig, VersioningConfig};
 pub use traits::{CryptoKeyGenerator, EncodedId};
+
+/// Exported commonly used modules.
+pub mod prelude {
+    pub use crate::{
+        key_generator::{AnnualVersionConfig, MonthlyVersionConfig, StaticVersionConfig},
+        timestamp_policies::use_timestamps,
+        typenum::consts::*,
+        BinaryId, CryptoKeyGenerator, KeyGenerator, VersioningConfig,
+    };
+}

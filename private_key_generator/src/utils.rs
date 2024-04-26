@@ -15,38 +15,35 @@ impl BoolMath for bool {
         }
     }
 }
+
 impl BoolMath for u32 {
     fn as_u8(&self) -> u8 {
         *self as u8
     }
 }
 
-/// Creates a mask that is (2^pow) - 1, equating to a number that has `8 - pow`
-/// leading 0s followed by ones.
-///
-/// # Panics
-/// This panics if `$pow` is greater than 8.
-macro_rules! byte_mask {
-    ($pow:expr) => {
-        u8::from(1 << $pow) - 1
+/// implements a const mask function for some unsigned integers
+macro_rules! impl_mask {
+    ($name:ident, $type:ty, $bits:literal) => {
+        /// Creates a mask that evaluates to (2^pow) - 1, equating to a number that has
+        /// `32 - pow` leading 0s followed by `pow` ones.
+        ///
+        /// # Panics
+        ///
+        /// This panics if `pow` is greater than the amount of bits of the type.
+        pub(crate) const fn $name(pow: u8) -> $type {
+            match pow {
+                $bits => <$type>::MAX,
+                0 => 0,
+                _ => (1 << pow) - 1,
+            }
+        }
     };
 }
 
-/// Creates a mask that is (2^pow) - 1, equating to a number that has `64 - pow`
-/// leading 0s followed by ones.
-///
-/// While this is called "u64_mask", it can output a u32 as well, and it can
-/// probably output other types. The main reason it is different from
-/// `byte_mask` is that `byte_mask` is explicitly a `u8`.
-///
-/// # Panics
-/// This panics if `$pow` is greater than 64.
-#[macro_export]
-macro_rules! u64_mask {
-    ($pow:expr) => {
-        (1 << $pow) - 1
-    };
-}
+impl_mask!(byte_mask, u8, 8);
+impl_mask!(u32_mask, u32, 32);
+impl_mask!(u64_mask, u64, 64);
 
 /// Inserts a specific number of bits of a u64 into a slice.
 ///
@@ -92,13 +89,13 @@ fn insert_int_bits_v2(
     let slice = int.to_le_bytes();
 
     if num_bits_to_insert < 8 - bits_to_preserve {
-        dest[0] &= byte_mask!(bits_to_preserve);
-        dest[0] |= slice[0] & byte_mask!(bits_to_preserve + num_bits_to_insert);
+        dest[0] &= byte_mask(bits_to_preserve);
+        dest[0] |= slice[0] & byte_mask(bits_to_preserve + num_bits_to_insert);
         return (dest, num_bits_to_insert + bits_to_preserve);
     }
 
     if bits_to_preserve > 0 {
-        dest[0] &= byte_mask!(bits_to_preserve);
+        dest[0] &= byte_mask(bits_to_preserve);
         dest[0] |= slice[0];
         num_bits_to_insert -= 8 - bits_to_preserve;
     } else {
@@ -113,7 +110,7 @@ fn insert_int_bits_v2(
             num_bits_to_insert -= 8;
             i += 1;
         } else {
-            let mask = byte_mask!(num_bits_to_insert);
+            let mask = byte_mask(num_bits_to_insert);
             dest[i] &= !mask;
             dest[i] |= slice[i] & mask;
             return (&mut dest[i..], num_bits_to_insert);
@@ -144,7 +141,7 @@ fn extract_int_v2(src: &[u8], num_bits_to_extract: u8, mut lower_bits_used: u8) 
     arr[..len].copy_from_slice(&src[..len]);
     let mut result = u64::from_le_bytes(arr);
     result >>= lower_bits_used;
-    result & u64_mask!(num_bits_to_extract)
+    result & u64_mask(num_bits_to_extract)
 }
 
 /// Inserts multiple trimmed ints into a slice.
@@ -233,6 +230,7 @@ mod tests {
     use std::format;
     use std::string::String;
 
+    /// A function called by another test
     fn test_slices(max_bits: u8) {
         for bits_to_preserve in 0..8 {
             for num_bits in 1..max_bits {
@@ -282,8 +280,8 @@ mod tests {
             for j in 1..56 {
                 for bits_to_preserve in 0..7 {
                     for _test in 0..12 {
-                        let i_bit_number = OsRng.next_u64() & u64_mask!(i);
-                        let j_bit_number = OsRng.next_u64() & u64_mask!(j);
+                        let i_bit_number = OsRng.next_u64() & u64_mask(i);
+                        let j_bit_number = OsRng.next_u64() & u64_mask(j);
 
                         let mut random_slice = [0u8; 15];
                         OsRng.fill_bytes(&mut random_slice);
@@ -367,8 +365,8 @@ mod tests {
                 for bits_to_preserve in 0..8 {
                     let mut test_slice = [0u8; 20];
 
-                    let i_ones = u64_mask!(i);
-                    let j_ones = u64_mask!(j);
+                    let i_ones = u64_mask(i);
+                    let j_ones = u64_mask(j);
 
                     // writing `i` 1s and `j` 1s to a [0u8; 20] should result in a slice that has
                     // exactly `i + j` 1s

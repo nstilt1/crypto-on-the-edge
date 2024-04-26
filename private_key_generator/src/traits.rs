@@ -1,6 +1,9 @@
 //! A few traits that could be used as generic arguments.
 
-use crate::error::{InvalidId, KeyIdCreationError};
+use crate::{
+    error::{IdCreationError, InvalidId},
+    VersionConfig,
+};
 use ecdsa::{EcdsaCurve, SignatureSize, SigningKey};
 use elliptic_curve::{
     ecdh::SharedSecret,
@@ -37,48 +40,64 @@ pub trait EncodedId:
     const MAC_START_INDEX: usize;
     /// The maximum prefix length for this ID
     const MAX_PREFIX_LEN: usize;
-    /// The amount of bits used to store the ID's version
-    const VERSION_BITS: u8;
-    /// The amount of bits used to store the ID's expiration timestamp
-    const TIMESTAMP_BITS: u8;
-    /// The amount of bits that the timestamp is right-shifted, removing
-    /// precision.
-    const TIMESTAMP_PRECISION_REDUCTION: u8;
+    /// The timestamp policy
+    const TIMESTAMP_POLICY: u8;
 
     /// The ID type, used for initializing an empty ID array
     type IdLen: ArraySize;
 
-    /// Generates an ID and partially encodes the metadata, but does not compute
-    /// the MAC.
+    /// Generates an ID without metadata and a MAC.
     ///
     /// If a prefix is supplied, up to `MAX_PREFIX_LEN` bytes will be copied to
     /// the beginning of the ID. The rest of the bytes up to the
     /// `MAC_START_INDEX` will be written with pseudorandom bytes. Then, the
     /// version and timestamp parts of the metadata will be overwritten with 0s
     /// to prepare for encoding them into the ID.
-    fn generate(
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any of the following conditions are true:
+    /// - `use_timestamps::Always` **and** `expire_time.is_none()`
+    /// - `use_timestamps::Never` **and** `expire_time.is_some()`
+    /// - `timestamp - now > MAX_EXPIRATION_TIME`
+    /// - `IDLength < (2 + VERSION_BITS + TIMESTAMP_BITS) as bytes +
+    ///   MAX_PREFIX_LEN + MacLen`;
+    ///   - note that the `use_timestamps` TimestampPolicy is taken into account
+    ///     when checking the IDLength
+    fn generate<V: VersionConfig>(
         prefix: &[u8],
         expire_time: Option<u64>,
         uses_associated_data: bool,
         version_epoch: u64,
         rng: &mut dyn RngCore,
-    ) -> (Self, Option<u64>);
+    ) -> Result<(Self, Option<u64>), IdCreationError>;
 
     /// Decompresses an expiration time into a timestamp referencing UNIX_EPOCH.
-    fn decompress_expiration_time(version_epoch: u64, timestamp: u64) -> u64;
+    fn decompress_expiration_time<V: VersionConfig>(version_epoch: u64, timestamp: u64) -> u64;
 
-    /// Validates the expiration time of the ID. It does not validate anything
-    /// else.
+    /// Validates the expiration time of the ID.
     ///
     /// This only works with the `std` feature, but if you aren't using `std`
     /// and you are able to get the seconds since EPOCH, you could still use
-    /// `get_expiration_time()` to manually check the expiration, or you could
-    /// refrain from using expiring key IDs.
+    /// `decode_version_and_timestamp_from_id()` to manually check the
+    /// expiration, or you could refrain from using expiring key IDs.
+    ///
+    /// # Errors
+    ///
+    /// This returns an error if the `std` feature is active and any of the
+    /// following conditions are true:
+    ///
+    /// - `expire_time.is_some()` and `use_timestamps::Never`
+    /// - `now > expiration time`
+    /// - `expire_time.is_none()` and `use_timestamps::Always`
     fn validate_expiration_time(&self, expire_time: Option<u64>) -> Result<(), InvalidId>;
 
-    /// Checks the "info byte" to see if the MAC should be computed using any
-    /// additional associated data. This could include a "client id" for when
-    /// only a specific client should use the ID.
+    /// Checks the 8th bit of the metadata to see if the MAC "should" be
+    /// computed using any additional associated data.
+    ///
+    /// A forged ID will likely fail our checks, but this helps us identify when
+    /// a legitimate ID is supposed to have its MAC and private key generated
+    /// using the provided associated data.
     fn uses_associated_data(&self) -> bool;
 }
 
@@ -126,7 +145,7 @@ pub trait CryptoKeyGenerator: Sized {
     /// The digest used within the HMAC of the HKDF
     type HkdfDigest: OutputSizeUser;
 
-    /// The Mac used for generating and validating IDs
+    /// The MAC used for generating and validating IDs
     type Mac: Mac;
 
     /// The RNG used for generating version salts/nonces.
@@ -150,6 +169,9 @@ pub trait CryptoKeyGenerator: Sized {
     /// `application_id`, returning the pseudorandom key from the
     /// [HKDF::extract()](hkdf::Hkdf::extract) operation.
     ///
+    /// You could precompute the PRK and use `from_prk()` instead of `new()` or
+    /// `extract()`, which can save a relatively small amount of time.
+    ///
     /// # Arguments
     ///
     /// * `hkdf_key` - the key used to initialize the HKDF. This should be a
@@ -157,6 +179,8 @@ pub trait CryptoKeyGenerator: Sized {
     ///   the hash function's internal buffer[^note].
     /// * `application_id` - an arbitrary application-specific value which does
     ///   not need to be an actual identifier.
+    /// * `mac` - an instance of a MAC
+    /// * `rng_seed` - an RNG seed
     ///
     /// # Recommended key length bounds
     /// Here are the recommended minimum and maximum key length boundaries for
@@ -200,6 +224,8 @@ pub trait CryptoKeyGenerator: Sized {
     ///
     /// * `prk` - This value must be cryptographically strong, and the length
     ///   must be at least the output size of the hash function used.
+    /// * `mac` - an instance of a MAC
+    /// * `rng_seed` - the RNG seed
     ///
     /// # Panics
     /// This panics when the `prk`'s length is less than the output size of the
@@ -232,6 +258,9 @@ pub trait CryptoKeyGenerator: Sized {
     ///   specified in the ID type.
     /// * `id_type` - the type of ID. you will need to provide this when
     ///   validating it.
+    /// * `expiration` - the expiration time of the ID in seconds since
+    ///   UNIX_EPOCH
+    /// * `associated_data` - any data that you want to be bound to this id
     /// * `rng` - an RNG that will generate the majority of the pseudorandom
     ///   bytes in the ID
     fn generate_keyless_id<Id>(
@@ -241,12 +270,12 @@ pub trait CryptoKeyGenerator: Sized {
         expiration: Option<u64>,
         associated_data: Option<&[u8]>,
         rng: &mut dyn RngCore,
-    ) -> Id
+    ) -> Result<Id, IdCreationError>
     where
         Id: EncodedId;
 
     /// Validates a keyless ID; if the ID is encoded in Base64, you will need to
-    /// decode it first.
+    /// decode it to binary first.
     ///
     /// This method will attempt to validate an ID based on the ID's length, the
     /// encoded version number, the MAC, and the `id_type` that you provided
@@ -256,6 +285,7 @@ pub trait CryptoKeyGenerator: Sized {
     ///
     /// * `id` - the binary ID slice
     /// * `id_type` - the type of ID
+    /// * `associated_data` - any data that might be associated with this ID.
     fn validate_keyless_id<Id>(
         &mut self,
         id: &[u8],
@@ -291,7 +321,7 @@ pub trait CryptoKeyGenerator: Sized {
         expiration: Option<u64>,
         associated_data: Option<&[u8]>,
         rng: &mut dyn RngCore,
-    ) -> Result<(Id, SigningKey<C>), KeyIdCreationError>
+    ) -> Result<(Id, SigningKey<C>), IdCreationError>
     where
         C: EcdsaCurve + CurveArithmetic + JwkParameters,
         Scalar<C>: Invert<Output = CtOption<Scalar<C>>>,
@@ -387,7 +417,7 @@ pub trait CryptoKeyGenerator: Sized {
         expiration: Option<u64>,
         associated_data: Option<&[u8]>,
         rng: &mut dyn RngCore,
-    ) -> Result<(Id, PublicKey<C>), KeyIdCreationError>
+    ) -> Result<(Id, PublicKey<C>), IdCreationError>
     where
         C: CurveArithmetic + JwkParameters,
         FieldBytesSize<C>: ModulusSize,

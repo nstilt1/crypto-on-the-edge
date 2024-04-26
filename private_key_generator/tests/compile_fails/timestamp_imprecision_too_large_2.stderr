@@ -1,0 +1,49 @@
+error[E0080]: evaluation of `<private_key_generator::VersioningConfig<0, 1000000000, 32, 56, 9, 1000000000, 800> as private_key_generator::VersionConfig>::TIMESTAMP_PRECISION_LOSS` failed
+ --> src/key_generator.rs
+  |
+  | / ...   [/* TIMESTAMP_PRECISION_LOSS + TIMESTAMP_PRECISION_BITS is greater than 64. A timestamp range of over 2^64 seconds is likely unnece...
+  | | ...       [TIMESTAMP_PRECISION_LOSS as usize]
+  | |_____________________________________________^ index out of bounds: the length is 0 but the index is 9
+
+error[E0080]: evaluation of `<private_key_generator::VersioningConfig<0, 1000000000, 32, 56, 9, 1000000000, 800> as VersionConfig>::TIMESTAMP_BITS` failed
+ --> src/utils.rs
+  |
+  | impl_mask!(u64_mask, u64, 64);
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ attempt to shift left by `65_u8`, which would overflow
+  |
+note: inside `private_key_generator::utils::u64_mask`
+ --> src/utils.rs
+  |
+  | impl_mask!(u64_mask, u64, 64);
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: inside `<private_key_generator::VersioningConfig<0, 1000000000, 32, 56, 9, 1000000000, 800> as VersionConfig>::TIMESTAMP_BITS`
+ --> src/key_generator.rs
+  |
+  |             let max_representable_time = u64_mask(TIMESTAMP_BITS + TIMESTAMP_PRECISION_LOSS);
+  |                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  = note: this error originates in the macro `impl_mask` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+note: erroneous constant used
+   --> src/id.rs
+    |
+    |                 &[V::VERSION_BITS, V::TIMESTAMP_BITS],
+    |                                    ^^^^^^^^^^^^^^^^^
+
+note: the above error was encountered while instantiating `fn <private_key_generator::BinaryId<private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UTerm, private_key_generator::prelude::B1>, private_key_generator::prelude::B1>, private_key_generator::prelude::B0>, private_key_generator::prelude::B0>, private_key_generator::prelude::B0>, private_key_generator::prelude::B0>, private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UTerm, private_key_generator::prelude::B1>, private_key_generator::prelude::B0>, private_key_generator::prelude::B1>, 5, private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UTerm, private_key_generator::prelude::B1>, private_key_generator::prelude::B1>, private_key_generator::prelude::B1>, private_key_generator::prelude::B0>, private_key_generator::prelude::B1>, private_key_generator::prelude::B0>> as private_key_generator::EncodedId>::generate::<private_key_generator::VersioningConfig<0, 1000000000, 32, 56, 9, 1000000000, 800>>`
+   --> src/key_generator.rs
+    |
+    |           let (mut id, trimmed_timestamp) = Id::generate::<V>(
+    |  ___________________________________________^
+    | |             prefix,
+    | |             expiration,
+    | |             associated_data.is_some(),
+    | |             self.current_version_epoch,
+    | |             rng,
+    | |         )?;
+    | |_________^
+
+note: erroneous constant used
+   --> src/key_generator.rs
+    |
+    |                 &[V::VERSION_BITS, V::TIMESTAMP_BITS],
+    |                                    ^^^^^^^^^^^^^^^^^

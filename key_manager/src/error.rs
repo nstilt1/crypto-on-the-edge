@@ -1,6 +1,6 @@
 use aead::Error as AeadError;
 use base64::DecodeError as B64DecodeError;
-use private_key_generator::{elliptic_curve::Error as EcError, InvalidId};
+use private_key_generator::{elliptic_curve::Error as EcError, error::IdCreationError, InvalidId};
 use prost::DecodeError;
 
 /// An error arising from our protocol.
@@ -16,6 +16,7 @@ pub enum ProtocolError {
     ClientIdNotSet,
     CanOnlyRegenerateIdDuringHandshake,
     InvalidRequest,
+    IdCreationError(IdCreationError)
 }
 
 impl From<DecodeError> for ProtocolError {
@@ -27,6 +28,12 @@ impl From<DecodeError> for ProtocolError {
 impl From<InvalidId> for ProtocolError {
     fn from(value: InvalidId) -> Self {
         Self::InvalidId(value)
+    }
+}
+
+impl From<IdCreationError> for ProtocolError {
+    fn from(value: IdCreationError) -> Self {
+        Self::IdCreationError(value)
     }
 }
 
@@ -57,8 +64,8 @@ impl core::fmt::Display for ProtocolError {
             Self::InvalidProtobufMessage(v) => v.to_string(),
             Self::Base64DecodeError(v) => v.to_string(),
             Self::ClientIdNotSet => "You must successfully call 'decrypt_and_hash_request()' \
-                                     prior to calling this function"
-                .into(),
+                                     prior to calling this function".into(),
+            Self::IdCreationError(v) => v.to_string(),
             _ => "".to_string(),
         };
         f.write_str(&msg)

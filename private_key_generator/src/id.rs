@@ -31,11 +31,42 @@ use elliptic_curve::rand_core::RngCore;
 #[cfg(feature = "std")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::{error::InvalidId, utils::insert_ints_into_slice};
-use crate::{traits::EncodedId, utils::BoolMath};
+use crate::{
+    error::{IdCreationError, InvalidId},
+    utils::insert_ints_into_slice,
+    VersionConfig,
+};
+use crate::{
+    traits::EncodedId,
+    utils::{byte_mask, BoolMath},
+};
 
 /// The amount of bits being used for bools by this ID in the metadata byte
 pub(crate) const BITS_IN_USE: u8 = 2;
+
+/// A module containing an enum-like module with types that can restrict the ID
+/// validation process based on the presence of a timestamp in the ID.
+pub mod timestamp_policies {
+    /// Some timestamp policies.
+    pub mod use_timestamps {
+        use crate::typenum::consts::{U57, U58, U59};
+
+        /// This timestamp policy enforces that every ID created and validated
+        /// must have a timestamp. Otherwise, the creation or validation will
+        /// return an error.
+        pub type Always = U57;
+        /// This timestamp policy is more relaxed. You are free to make IDs with
+        /// or without timestamps, and timestampless IDs can be successfully
+        /// validated.
+        pub type Sometimes = U58;
+        /// This timestamp policy ensures that there will never be a timestamp
+        /// in an associated ID type. This is primarily useful for making
+        /// smaller IDs that only contain a prefix, version number, and MAC,
+        /// with the rest of the space filled with pseudorandom bits.
+        pub type Never = U59;
+    }
+}
+use timestamp_policies::use_timestamps;
 
 /// Represents a Binary ID structure with configurable parameters for size,
 /// versioning, and expiration encoding.
@@ -54,17 +85,6 @@ pub(crate) const BITS_IN_USE: u8 = 2;
 ///   ID. This value must be less than 32 to fit within the constraints. The
 ///   version is stored in Little Endian order. If you don't want to use
 ///   versions for the ID, set this to zero.
-/// - `TIMESTAMP_BITS`: The number of bits used to encode the expiration
-///   timestamp of the ID. This value must be less than 57. The timestamp is
-///   stored in Little Endian order.
-/// - `TIMESTAMP_PRECISION_REDUCTION`: Specifies the reduction in timestamp
-///   precision. It is the number of least significant bits by which the
-///   timestamp value is right-shifted before being stored. This shift reduces
-///   the timestamp's precision but extends the maximum representable time. The
-///   decoded timestamp will always be between `2^(TIMESTAMP_PRECISION_REDUCTION
-///   - 1) + 1` and `2^(TIMESTAMP_PRECISION_REDUCTION) +
-///   2^(TIMESTAMP_PRECISION_REDUCTION - 1)` seconds greater than the input
-///   valued.
 ///
 /// # Remarks
 /// The `BinaryId` struct allows for detailed control over the encoding of
@@ -97,46 +117,60 @@ pub struct BinaryId<
     IdLength: Unsigned + ArraySize,
     MacLength: Unsigned,
     const MAX_PREFIX_LEN: usize,
-    const VERSION_BITS: u8,
-    const TIMESTAMP_BITS: u8,
-    const TIMESTAMP_PRECISION_REDUCTION: u8,
+    TimestampPolicy: Unsigned,
 > {
     /// A public id for this key
     pub id: Array<u8, IdLength>,
     _mac_len: PhantomData<MacLength>,
+    _timestamp_policy: PhantomData<TimestampPolicy>,
 }
 
-impl<
-        IdLength: Unsigned + ArraySize,
-        MacLength: Unsigned,
-        const MAX_PREFIX_LEN: usize,
-        const VERSION_BITS: u8,
-        const TIMESTAMP_BITS: u8,
-        const TIMESTAMP_PRECISION_REDUCTION: u8,
-    > EncodedId
-    for BinaryId<
-        IdLength,
-        MacLength,
-        MAX_PREFIX_LEN,
-        VERSION_BITS,
-        TIMESTAMP_BITS,
-        TIMESTAMP_PRECISION_REDUCTION,
-    >
+/// Validates an ID's parameter + VersionConfig combination.
+///
+/// Returns 0 on success.
+///
+/// # Type parameters
+///
+/// - `V: VersionConfig` - the versioning config of the key generator, which
+///   applies to the ID
+/// - `IdLen` - the length of the ID in bytes
+/// - `MacLen` - the length of the MAC of the ID in bytes
+/// - `MAX_PREFIX_LEN` - the maximum prefix length
+/// - `TIMESTAMP_POLICY` - the ID's timestamp policy
+const fn validate_id_len<V, IdLen, MacLen, const MAX_PREFIX_LEN: usize, TP>() -> bool
+where
+    V: VersionConfig,
+    IdLen: Unsigned,
+    MacLen: Unsigned,
+    TP: Unsigned,
+{
+    let timestamp_bits = match TP::U8 {
+        use_timestamps::Always::U8 => V::TIMESTAMP_BITS,
+        use_timestamps::Sometimes::U8 => V::TIMESTAMP_BITS,
+        use_timestamps::Never::U8 => 0,
+        _ => [ /* Use a timestamp_policy from `timestamp_policies` */][TP::USIZE],
+    };
+
+    let metadata_bits = timestamp_bits + BITS_IN_USE + V::VERSION_BITS;
+    let metadata_bytes = (metadata_bits >> 3) + (metadata_bits & byte_mask(3) > 0) as u8;
+
+    let consumed_bytes = MAX_PREFIX_LEN + metadata_bytes as usize + MacLen::USIZE;
+
+    consumed_bytes <= IdLen::USIZE
+}
+
+impl<IdLength, MacLength, const MAX_PREFIX_LEN: usize, TimestampPolicy> EncodedId
+    for BinaryId<IdLength, MacLength, MAX_PREFIX_LEN, TimestampPolicy>
 where
     IdLength: Unsigned + ArraySize,
     MacLength: Unsigned,
+    TimestampPolicy: Unsigned,
 {
     const MAC_LENGTH: usize = {
-        let bits_in_use = BITS_IN_USE + VERSION_BITS + TIMESTAMP_BITS;
-        let metadata_bytes = (bits_in_use >> 3) as usize + ((bits_in_use & 0b111) > 0) as usize;
-
-        let max_mac_len = IdLength::USIZE - MAX_PREFIX_LEN - metadata_bytes;
-
-        match MacLength::USIZE <= max_mac_len {
+        match MacLength::USIZE >= 1 {
             true => MacLength::USIZE,
             false => {
-                [/* The IdLength must be large enough to hold `MacLength bytes + MAX_PREFIX_LENGTH bytes + (2 + VERSION_BITS + TIMESTAMP_BITS) worth of bytes` */]
-                    [MacLength::USIZE]
+                [/* You probably want the ID's MAC length to be at least 1 */][MacLength::USIZE]
             }
         }
     };
@@ -145,63 +179,52 @@ where
 
     const METADATA_IDX: usize = MAX_PREFIX_LEN;
 
-    const MAX_PREFIX_LEN: usize = {
-        let bits_in_use = BITS_IN_USE + VERSION_BITS + TIMESTAMP_BITS;
-        let metadata_bytes = (bits_in_use >> 3) as usize + ((bits_in_use & 0b111) > 0) as usize;
-
-        let max_possible_prefix_len = IdLength::USIZE - MacLength::USIZE - metadata_bytes;
-
-        match MAX_PREFIX_LEN as usize <= max_possible_prefix_len {
-            true => MAX_PREFIX_LEN,
-            false => {
-                [/* The ID must be large enough to hold `MacLength bytes + MAX_PREFIX_LENGTH bytes + (2 + VERSION_BITS + TIMESTAMP_BITS) worth of bytes` */]
-                    [MAX_PREFIX_LEN]
-            }
-        }
+    const TIMESTAMP_POLICY: u8 = match TimestampPolicy::U8 {
+        use_timestamps::Always::U8 => TimestampPolicy::U8,
+        use_timestamps::Sometimes::U8 => TimestampPolicy::U8,
+        use_timestamps::Never::U8 => TimestampPolicy::U8,
+        _ => [ /* Use a TIMESTAMP_POLICY from timestamp_policies */ ][TimestampPolicy::USIZE],
     };
+
+    const MAX_PREFIX_LEN: usize = MAX_PREFIX_LEN;
     type IdLen = IdLength;
 
-    const VERSION_BITS: u8 = {
-        match VERSION_BITS <= 32 {
-            true => VERSION_BITS,
-            false => [/* VERSION_BITS must be less than or equal to 32. */][VERSION_BITS as usize],
-        }
-    };
-
-    const TIMESTAMP_BITS: u8 = {
-        match TIMESTAMP_BITS <= 56 {
-            true => TIMESTAMP_BITS,
-            false => {
-                [/* TIMESTAMP_BITS must be less than or equal to 56 */][TIMESTAMP_BITS as usize]
-            }
-        }
-    };
-
-    const TIMESTAMP_PRECISION_REDUCTION: u8 = {
-        match TIMESTAMP_PRECISION_REDUCTION <= 27 {
-            true => TIMESTAMP_PRECISION_REDUCTION,
-            false => {
-                [/* Any value over 28 for the TIMESTAMP_PRECISION_REDUCTION parameter will make your timestamp dates off by over 8 years... */]
-                    [TIMESTAMP_PRECISION_REDUCTION as usize]
-            }
-        }
-    };
-
     #[inline]
-    fn generate(
+    fn generate<V: VersionConfig>(
         prefix: &[u8],
         expire_time_seconds: Option<u64>,
         uses_accociated_data: bool,
         version_epoch: u64,
         rng: &mut dyn RngCore,
-    ) -> (Self, Option<u64>) {
-        debug_assert!(
-            VERSION_BITS <= 56,
-            "The Id can only handle VERSION_BITS between 0 <= VB <= 56."
-        );
+    ) -> Result<(Self, Option<u64>), IdCreationError> {
+        if let Some(ref timestamp) = &expire_time_seconds {
+            if TimestampPolicy::U8.eq(&use_timestamps::Never::U8) {
+                return Err(IdCreationError::IdShouldNotHaveExpirationTime);
+            }
+            #[cfg(feature = "std")]
+            {
+                let diff = timestamp
+                    - SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
+                if diff > V::MAX_EXPIRATION_TIME {
+                    return Err(IdCreationError::ExpirationTimeTooLarge);
+                }
+            }
+        } else if expire_time_seconds.is_none()
+            && TimestampPolicy::U8.eq(&use_timestamps::Always::U8)
+        {
+            return Err(IdCreationError::MissingExpirationTime);
+        }
 
-        let mut id: Array<u8, IdLength> = Default::default();
+        if !validate_id_len::<V, IdLength, MacLength, { MAX_PREFIX_LEN }, TimestampPolicy>() {
+            return Err(IdCreationError::IdLengthCannotHoldItsData);
+        }
+
         let stream_start_idx: usize = min(prefix.len(), MAX_PREFIX_LEN);
+        let mut id: Array<u8, IdLength> = Default::default();
+
         id[..stream_start_idx].copy_from_slice(&prefix[..stream_start_idx]);
         rng.fill_bytes(&mut id[stream_start_idx..Self::MAC_START_INDEX]);
 
@@ -217,17 +240,18 @@ where
         if let Some(mut expiration) = expire_time_seconds {
             expiration -= version_epoch;
 
-            if Self::TIMESTAMP_PRECISION_REDUCTION > 0 {
+            if V::TIMESTAMP_PRECISION_LOSS > 0 {
                 // determine if right shifting by TIMESTAMP_PRECISION_REDUCTION removes a
-                // sizeable amount of time, then add some extra time
+                // sizeable amount of time, then add some extra time if it does. This is to
+                // prevent the difference in time potentially being 1 second
 
                 // to be exact, this checks if the time removed is greater than or equal to half
                 // of the maximum amount of time the removed value can hold by checking the next
                 // bit's value
-                let next_bit_idx = Self::TIMESTAMP_PRECISION_REDUCTION - 1;
+                let next_bit_idx = V::TIMESTAMP_PRECISION_LOSS - 1;
                 let next_high_bit = (expiration >> next_bit_idx) & 0b1;
 
-                expiration = (expiration >> Self::TIMESTAMP_PRECISION_REDUCTION) + next_high_bit + 1
+                expiration = (expiration >> V::TIMESTAMP_PRECISION_LOSS) + next_high_bit + 1
             } else {
                 expiration += 1;
             }
@@ -236,38 +260,40 @@ where
             insert_ints_into_slice(
                 &[0, 0],
                 &mut id[Self::METADATA_IDX..],
-                &[VERSION_BITS, TIMESTAMP_BITS],
+                &[V::VERSION_BITS, V::TIMESTAMP_BITS],
                 BITS_IN_USE,
             );
 
-            (
+            Ok((
                 Self {
                     id,
                     _mac_len: PhantomData,
+                    _timestamp_policy: PhantomData,
                 },
                 Some(expiration),
-            )
+            ))
         } else {
             // insert 0s as placeholder into version area
             insert_ints_into_slice(
                 &[0],
                 &mut id[Self::METADATA_IDX..],
-                &[VERSION_BITS],
+                &[V::VERSION_BITS],
                 BITS_IN_USE,
             );
-            (
+            Ok((
                 Self {
                     id,
                     _mac_len: PhantomData,
+                    _timestamp_policy: PhantomData,
                 },
                 None,
-            )
+            ))
         }
     }
 
     #[inline]
-    fn decompress_expiration_time(version_epoch: u64, timestamp: u64) -> u64 {
-        (timestamp << Self::TIMESTAMP_PRECISION_REDUCTION) + version_epoch
+    fn decompress_expiration_time<V: VersionConfig>(version_epoch: u64, timestamp: u64) -> u64 {
+        (timestamp << V::TIMESTAMP_PRECISION_LOSS) + version_epoch
     }
 
     #[inline]
@@ -276,18 +302,26 @@ where
         return Ok(());
 
         #[cfg(feature = "std")]
-        if let Some(expiration_time) = expire_time {
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-            if now > expiration_time {
-                Err(InvalidId::Expired)
+        {
+            if let Some(expiration_time) = expire_time {
+                if TimestampPolicy::U8.ne(&use_timestamps::Never::U8) {
+                    return Err(InvalidId::IdMustNotExpire);
+                }
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                if now > expiration_time {
+                    Err(InvalidId::Expired)
+                } else {
+                    Ok(())
+                }
             } else {
+                if TimestampPolicy::U8.eq(&use_timestamps::Always::U8) {
+                    return Err(InvalidId::IdsMustExpire);
+                }
                 Ok(())
             }
-        } else {
-            Ok(())
         }
     }
 
@@ -297,94 +331,52 @@ where
     }
 }
 
-impl<
-        IdLength: Unsigned + ArraySize,
-        MacLength: Unsigned,
-        const MAX_PREFIX_LEN: usize,
-        const VERSION_BITS: u8,
-        const TIMESTAMP_BITS: u8,
-        const TIMESTAMP_PRECISION_REDUCTION: u8,
-    > AsRef<[u8]>
-    for BinaryId<
-        IdLength,
-        MacLength,
-        MAX_PREFIX_LEN,
-        VERSION_BITS,
-        TIMESTAMP_BITS,
-        TIMESTAMP_PRECISION_REDUCTION,
-    >
+impl<IdLength, MacLength, const MAX_PREFIX_LEN: usize, TimestampPolicy> AsRef<[u8]>
+    for BinaryId<IdLength, MacLength, MAX_PREFIX_LEN, TimestampPolicy>
+where
+    IdLength: Unsigned + ArraySize,
+    MacLength: Unsigned,
+    TimestampPolicy: Unsigned,
 {
     fn as_ref(&self) -> &[u8] {
         &self.id
     }
 }
 
-impl<
-        IdLength: Unsigned + ArraySize,
-        MacLength: Unsigned,
-        const MAX_PREFIX_LEN: usize,
-        const VERSION_BITS: u8,
-        const TIMESTAMP_BITS: u8,
-        const TIMESTAMP_PRECISION_REDUCTION: u8,
-    > Default
-    for BinaryId<
-        IdLength,
-        MacLength,
-        MAX_PREFIX_LEN,
-        VERSION_BITS,
-        TIMESTAMP_BITS,
-        TIMESTAMP_PRECISION_REDUCTION,
-    >
+impl<IdLength, MacLength, const MAX_PREFIX_LEN: usize, TimestampPolicy> Default
+    for BinaryId<IdLength, MacLength, MAX_PREFIX_LEN, TimestampPolicy>
+where
+    IdLength: Unsigned + ArraySize,
+    MacLength: Unsigned,
+    TimestampPolicy: Unsigned,
 {
     fn default() -> Self {
         Self {
             id: Default::default(),
             _mac_len: PhantomData,
+            _timestamp_policy: PhantomData,
         }
     }
 }
 
-impl<
-        IdLength: Unsigned + ArraySize,
-        MacLength: Unsigned,
-        const MAX_PREFIX_LEN: usize,
-        const VERSION_BITS: u8,
-        const TIMESTAMP_BITS: u8,
-        const TIMESTAMP_PRECISION_REDUCTION: u8,
-    > AsMut<[u8]>
-    for BinaryId<
-        IdLength,
-        MacLength,
-        MAX_PREFIX_LEN,
-        VERSION_BITS,
-        TIMESTAMP_BITS,
-        TIMESTAMP_PRECISION_REDUCTION,
-    >
+impl<IdLength, MacLength, const MAX_PREFIX_LEN: usize, TimestampPolicy> AsMut<[u8]>
+    for BinaryId<IdLength, MacLength, MAX_PREFIX_LEN, TimestampPolicy>
+where
+    IdLength: Unsigned + ArraySize,
+    MacLength: Unsigned,
+    TimestampPolicy: Unsigned,
 {
     fn as_mut(&mut self) -> &mut [u8] {
         self.id.as_mut_slice()
     }
 }
 
-impl<
-        IdLength,
-        MacLength,
-        const MAX_PREFIX_LEN: usize,
-        const VERSION_BITS: u8,
-        const TIMESTAMP_BITS: u8,
-        const TIMESTAMP_PRECISION_REDUCTION: u8,
-    > TryFrom<&[u8]>
-    for BinaryId<
-        IdLength,
-        MacLength,
-        MAX_PREFIX_LEN,
-        VERSION_BITS,
-        TIMESTAMP_BITS,
-        TIMESTAMP_PRECISION_REDUCTION,
-    >
+impl<IdLength, MacLength, const MAX_PREFIX_LEN: usize, TimestampPolicy> TryFrom<&[u8]>
+    for BinaryId<IdLength, MacLength, MAX_PREFIX_LEN, TimestampPolicy>
 where
     IdLength: Unsigned + ArraySize,
     MacLength: Unsigned,
+    TimestampPolicy: Unsigned,
 {
     type Error = InvalidId;
 
@@ -406,6 +398,7 @@ where
         Ok(Self {
             id,
             _mac_len: PhantomData,
+            _timestamp_policy: PhantomData,
         })
     }
 }
@@ -415,29 +408,23 @@ mod tests {
     use hkdf::hmac::digest::consts::{U48, U5};
     use rand_core::OsRng;
 
+    use crate::VersioningConfig;
+
     use super::*;
 
-    const VERSION_BITS: u8 = 3;
     const PREFIX_LEN: usize = 6;
-
-    const TIMESTAMP_BITS: u8 = 24;
-    const TIMESTAMP_PRECISION_REDUCTION: u8 = 8;
 
     #[test]
     fn uses_associated_data() {
         use super::EncodedId;
-        type IdVersion1 = BinaryId<
-            U48,
-            U5,
-            PREFIX_LEN,
-            VERSION_BITS,
-            TIMESTAMP_BITS,
-            TIMESTAMP_PRECISION_REDUCTION,
-        >;
+        type TestVersionConfig = VersioningConfig<0, 1_000_000_000, 24, 24, 8, 1_000_000_000, 800>;
+        type IdVersion1 = BinaryId<U48, U5, PREFIX_LEN, use_timestamps::Sometimes>;
 
-        let (id_with_associated_data, _) = IdVersion1::generate(&[], None, true, 3, &mut OsRng);
+        let (id_with_associated_data, _) =
+            IdVersion1::generate::<TestVersionConfig>(&[], None, true, 3, &mut OsRng).unwrap();
 
-        let (id_without_associated_data, _) = IdVersion1::generate(&[], None, false, 3, &mut OsRng);
+        let (id_without_associated_data, _) =
+            IdVersion1::generate::<TestVersionConfig>(&[], None, false, 3, &mut OsRng).unwrap();
 
         assert!(
             id_with_associated_data.uses_associated_data(),
