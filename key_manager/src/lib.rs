@@ -3,8 +3,7 @@
 
 use core::marker::PhantomData;
 use private_key_generator::{
-    ecdsa::{hazmat::DigestPrimitive, signature::Signer, EcdsaCurve, Signature, SignatureSize},
-    elliptic_curve::{
+    ecdsa::{hazmat::DigestPrimitive, signature::Signer, EcdsaCurve, Signature, SignatureSize}, elliptic_curve::{
         array::ArraySize,
         ops::Invert,
         point::PointCompression,
@@ -12,10 +11,7 @@ use private_key_generator::{
         subtle::CtOption,
         zeroize::{Zeroize, ZeroizeOnDrop},
         AffinePoint, CurveArithmetic, FieldBytesSize, JwkParameters, PublicKey, Scalar,
-    },
-    hkdf::hmac::digest::{core_api::BlockSizeUser, Output as HashOutput},
-    typenum::Unsigned,
-    CryptoKeyGenerator, Digest, EncodedId,
+    }, error::IdCreationError, hkdf::hmac::digest::{core_api::BlockSizeUser, Output as HashOutput}, typenum::Unsigned, CryptoKeyGenerator, Digest, EncodedId
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -165,7 +161,7 @@ where
         &mut self,
         count: usize,
         expiration: Option<u64>,
-    ) -> Vec<(KId, PublicKey<Ecdh>)> {
+    ) -> Result<Vec<(KId, PublicKey<Ecdh>)>, IdCreationError> {
         let mut output: Vec<(KId, PublicKey<Ecdh>)> = Vec::with_capacity(count);
 
         for _ in 0..count {
@@ -174,10 +170,10 @@ where
                 expiration,
                 None,
                 &mut self.rng,
-            ));
+            )?);
         }
 
-        output
+        Ok(output)
     }
 
     /// Decrypts and hashes a request.
@@ -262,7 +258,7 @@ where
                 None,
                 None,
                 &mut self.rng,
-            );
+            )?;
         } else {
             // validate the client's ID
             self.client_id = self.key_generator.validate_keyless_id(
@@ -394,7 +390,7 @@ where
             None,
             Some(self.client_id.as_ref()),
             &mut self.rng,
-        );
+        )?;
 
         let next_key = EcdhKey {
             ecdh_key_id: key_id.as_ref().to_vec(),
@@ -482,7 +478,7 @@ where
             None,
             None,
             &mut self.rng,
-        );
+        )?;
         Ok(self.client_id.as_ref())
     }
 }

@@ -1,23 +1,42 @@
-error[E0080]: evaluation of `<private_key_generator_docs::BinaryId<private_key_generator_docs::typenum::UInt<private_key_generator_docs::typenum::UInt<private_key_generator_docs::typenum::UInt<private_key_generator_docs::typenum::UInt<private_key_generator_docs::typenum::UInt<private_key_generator_docs::typenum::UInt<private_key_generator_docs::typenum::UTerm, private_key_generator_docs::typenum::B1>, private_key_generator_docs::typenum::B1>, private_key_generator_docs::typenum::B0>, private_key_generator_docs::typenum::B0>, private_key_generator_docs::typenum::B0>, private_key_generator_docs::typenum::B0>, private_key_generator_docs::typenum::UInt<private_key_generator_docs::typenum::UInt<private_key_generator_docs::typenum::UInt<private_key_generator_docs::typenum::UTerm, private_key_generator_docs::typenum::B1>, private_key_generator_docs::typenum::B0>, private_key_generator_docs::typenum::B1>, 3, 33, 24, 8> as private_key_generator_docs::EncodedId>::VERSION_BITS` failed
- --> src/id.rs
+error[E0080]: evaluation of `<private_key_generator::VersioningConfig<0, 1000000000, 33, 56, 4, 1000000000, 800> as private_key_generator::VersionConfig>::VERSION_BITS` failed
+ --> src/key_generator.rs
   |
-  |             false => [/* VERSION_BITS must be less than or equal to 32. */][ VERSION_BITS as usize ]
-  |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ index out of bounds: the length is 0 but the index is 33
+  |                     [/* VERSION_BITS must be less than or equal to 32 */][VERSION_BITS as usize]
+  |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ index out of bounds: the length is 0 but the index is 33
 
-note: erroneous constant encountered
+note: erroneous constant used
+   --> src/id.rs
+    |
+    |                 &[V::VERSION_BITS, V::TIMESTAMP_BITS],
+    |                   ^^^^^^^^^^^^^^^
+
+note: erroneous constant used
+   --> src/id.rs
+    |
+    |                 &[V::VERSION_BITS],
+    |                   ^^^^^^^^^^^^^^^
+
+note: the above error was encountered while instantiating `fn <private_key_generator::BinaryId<private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UTerm, private_key_generator::prelude::B1>, private_key_generator::prelude::B1>, private_key_generator::prelude::B0>, private_key_generator::prelude::B0>, private_key_generator::prelude::B0>, private_key_generator::prelude::B0>, private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UTerm, private_key_generator::prelude::B1>, private_key_generator::prelude::B0>, private_key_generator::prelude::B1>, 5, private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UTerm, private_key_generator::prelude::B1>, private_key_generator::prelude::B1>, private_key_generator::prelude::B1>, private_key_generator::prelude::B0>, private_key_generator::prelude::B1>, private_key_generator::prelude::B0>> as private_key_generator::EncodedId>::generate::<private_key_generator::VersioningConfig<0, 1000000000, 33, 56, 4, 1000000000, 800>>`
    --> src/key_generator.rs
     |
-    | ...   insert_ints_into_slice(&[masked_version as u64, masked_timestamp], &mut id.as_mut()[Id::METADATA_IDX..], &[Id::VERSION_BITS, Id::TI...
-    |                                                                                                                  ^^^^^^^^^^^^^^^^
+    |           let (mut id, trimmed_timestamp) = Id::generate::<V>(
+    |  ___________________________________________^
+    | |             prefix,
+    | |             expiration,
+    | |             associated_data.is_some(),
+    | |             self.current_version_epoch,
+    | |             rng,
+    | |         )?;
+    | |_________^
 
-note: erroneous constant encountered
+note: erroneous constant used
    --> src/key_generator.rs
     |
-    |             insert_ints_into_slice(&[masked_version as u64], &mut id.as_mut()[Id::METADATA_IDX..], &[Id::VERSION_BITS], BITS_IN_USE);
-    |                                                                                                      ^^^^^^^^^^^^^^^^
+    |                 &[V::VERSION_BITS, V::TIMESTAMP_BITS],
+    |                   ^^^^^^^^^^^^^^^
 
-note: the above error was encountered while instantiating `fn private_key_generator_docs::KeyGenerator::<sha2::digest::core_api::CoreWrapper<hkdf::hmac::HmacCore<sha2::digest::core_api::CoreWrapper<sha2::digest::core_api::CtVariableCoreWrapper<sha2::Sha256VarCore, private_key_generator_docs::typenum::UInt<private_key_generator_docs::typenum::UInt<private_key_generator_docs::typenum::UInt<private_key_generator_docs::typenum::UInt<private_key_generator_docs::typenum::UInt<private_key_generator_docs::typenum::UInt<private_key_generator_docs::typenum::UTerm, private_key_generator_docs::typenum::B1>, private_key_generator_docs::typenum::B0>, private_key_generator_docs::typenum::B0>, private_key_generator_docs::typenum::B0>, private_key_generator_docs::typenum::B0>, private_key_generator_docs::typenum::B0>, sha2::OidSha256>>>>, private_key_generator_docs::VersioningConfig<3, 600, false, 4>, rand_chacha::ChaCha8Rng, sha2::digest::core_api::CoreWrapper<sha2::digest::core_api::CtVariableCoreWrapper<sha2::Sha256VarCore, private_key_generator_docs::typenum::UInt<private_key_generator_docs::typenum::UInt<private_key_generator_docs::typenum::UInt<private_key_generator_docs::typenum::UInt<private_key_generator_docs::typenum::UInt<private_key_generator_docs::typenum::UInt<private_key_generator_docs::typenum::UTerm, private_key_generator_docs::typenum::B1>, private_key_generator_docs::typenum::B0>, private_key_generator_docs::typenum::B0>, private_key_generator_docs::typenum::B0>, private_key_generator_docs::typenum::B0>, private_key_generator_docs::typenum::B0>, sha2::OidSha256>>>::encode_version_and_timestamp_into_id::<private_key_generator_docs::BinaryId<private_key_generator_docs::typenum::UInt<private_key_generator_docs::typenum::UInt<private_key_generator_docs::typenum::UInt<private_key_generator_docs::typenum::UInt<private_key_generator_docs::typenum::UInt<private_key_generator_docs::typenum::UInt<private_key_generator_docs::typenum::UTerm, private_key_generator_docs::typenum::B1>, private_key_generator_docs::typenum::B1>, private_key_generator_docs::typenum::B0>, private_key_generator_docs::typenum::B0>, private_key_generator_docs::typenum::B0>, private_key_generator_docs::typenum::B0>, private_key_generator_docs::typenum::UInt<private_key_generator_docs::typenum::UInt<private_key_generator_docs::typenum::UInt<private_key_generator_docs::typenum::UTerm, private_key_generator_docs::typenum::B1>, private_key_generator_docs::typenum::B0>, private_key_generator_docs::typenum::B1>, 3, 33, 24, 8>>`
+note: erroneous constant used
    --> src/key_generator.rs
     |
-    |         self.encode_version_and_timestamp_into_id(&mut id, trimmed_timestamp);
-    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |                 &[V::VERSION_BITS],
+    |                   ^^^^^^^^^^^^^^^

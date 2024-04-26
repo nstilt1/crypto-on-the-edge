@@ -1,14 +1,23 @@
-use private_key_generator_docs::{BinaryId, CryptoKeyGenerator, VersioningConfig, KeyGenerator, typenum::consts::{U48, U5}};
+use private_key_generator::prelude::*;
 use hkdf::hmac::{Hmac, KeyInit};
 use rand_chacha::ChaCha8Rng;
 use sha2::Sha256;
 
-type TestId = BinaryId<U48, U5, 3, 3, 24, 8>;
+type TestId = BinaryId<
+    U48, // IdLength: okay
+    U5,  // MacLength: okay
+    5,   // MAX_PREFIX_LEN: okay
+    use_timestamps::Sometimes
+>;
+
 type InvalidVersionLifetimeConfig = VersioningConfig<
-    3, // EPOCH can be any time between 0 and now
-    599, // VERSION LIFETIME must be at least 600 seconds
-    false, 
-    4
+    0,              // EPOCH
+    599,            // VERSION_LIFETIME
+    32,             // VERSION_BITS
+    56,             // TIMESTAMP_BITS
+    5,              // TIMESTAMP_PRECISION_LOSS is too high because TIMESTAMP_BITS + TIMESTAMP_PRECISION_LOSS is above 64
+    1_000_000_000,  // MAX_KEY_EXPIRATION_TIME
+    800             // BREAKING_POINT_YEARS
 >;
 
 fn main() {

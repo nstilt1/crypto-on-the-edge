@@ -27,9 +27,14 @@ pub enum InvalidId {
     /// the ID's version is smaller than the output of
     /// `get_minimum_accepted_key_id_version()`
     VersionOutOfDate,
-    /// This error will only occur if `REQUIRE_EXPIRING_KEYS` is set to true,
-    /// and if the ID is associated with a Key.
+    /// This error will only occur if `timestamp_policies::ALWAYS_USE` is set to
+    /// true and the bit that indicates that a timestamp should be in the ID is
+    /// not set.
     IdsMustExpire,
+    /// This error will only occur if `timestamp_policies::NEVER_USE` is set in
+    /// the validated ID's type, and if the bit that indicates that a timestamp
+    /// should be in the ID is set.
+    IdMustNotExpire,
     /// This error indicates that the expiration timestamp in the ID has passed
     /// or was invalid. This error only occurs with the `std` feature enabled
     /// due to the use of `SystemTime`.
@@ -72,7 +77,8 @@ impl core::fmt::Display for InvalidId {
 
                 Self::VersionTooLarge => "The ID's version was too large",
                 Self::VersionOutOfDate => "The ID's version is too old",
-                Self::IdsMustExpire => "The Key ID does not expire.",
+                Self::IdsMustExpire => "The Key ID does not expire when its ID type should.",
+                Self::IdMustNotExpire => "The Key ID expires when its ID type should not.",
                 Self::Expired => "The ID has expired",
                 Self::IdExpectedAssociatedData => {
                     "This ID either needs to be validated using associated data, or it was forged."
@@ -86,14 +92,18 @@ impl core::fmt::Display for InvalidId {
         }
         #[cfg(not(debug_assertions))]
         {
-            f.write_str("ID not found")
+            f.write_str(match self {
+                Self::Expired => "Token expired",
+                _ => "ID not found",
+            })
         }
     }
 }
 
 /// This error only happens when generating a new key and ID, and when
 /// `REQUIRE_EXPIRING_KEYS` is set to true.
-pub enum KeyIdCreationError {
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum IdCreationError {
     /// This error only occurs when `REQUIRE_EXPIRING_KEYS` is true and the
     /// expiration time on a Key ID is greater than the
     /// `MAXIMUM_KEY_EXPIRATION_TIME`.
@@ -101,4 +111,33 @@ pub enum KeyIdCreationError {
     /// This error only occurs when `REQUIRE_EXPIRING_KEYS` is true and the
     /// expiration time on a Key ID is None.
     MissingExpirationTime,
+    /// This error only occurs when `timestamp_policies::Never` is chosen for an
+    /// ID, and there was an attempt to create an expiring ID of that ID type.
+    IdShouldNotHaveExpirationTime,
+    /// This error occurs when the ID's length is not large enough to hold the
+    /// ID's data, or that the metadata or prefix are too long.
+    IdLengthCannotHoldItsData,
+}
+
+impl core::fmt::Display for IdCreationError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::ExpirationTimeTooLarge => {
+                "The expiration time provided to an ID/Key generation method was larger than the \
+                 VersioningConfig's MAX_KEY_EXPIRATION_TIME."
+            }
+            Self::IdLengthCannotHoldItsData => {
+                "The ID's length is not large enough to contain MAX_PREFIX_LEN + METADATA (2 + \
+                 VERSION_BITS + TIMESTAMP_BITS) as bytes + MacLength."
+            }
+            Self::IdShouldNotHaveExpirationTime => {
+                "The ID type has the `use_timestamps::Never` timestamp policy, but an expiration \
+                 time was supplied."
+            }
+            Self::MissingExpirationTime => {
+                "The ID type has the `use_timestamps::Always` timestamp policy, but an expiration \
+                 time was not supplied."
+            }
+        })
+    }
 }

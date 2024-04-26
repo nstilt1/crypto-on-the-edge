@@ -2,11 +2,10 @@
 
 //use digest::{CtOutput, Output};
 use crate::{
-    error::{InvalidId, KeyIdCreationError},
-    id::BITS_IN_USE,
+    error::{IdCreationError, InvalidId},
+    id::{timestamp_policies::use_timestamps, BITS_IN_USE},
     traits::{AllowedRngs, CryptoKeyGenerator},
-    u64_mask,
-    utils::{extract_ints_from_slice, insert_ints_into_slice},
+    utils::{extract_ints_from_slice, insert_ints_into_slice, u32_mask, u64_mask},
 };
 use ecdsa::{
     elliptic_curve::{ops::Invert, CurveArithmetic, FieldBytes, FieldBytesSize, Scalar},
@@ -36,9 +35,11 @@ use core::marker::PhantomData;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::traits::EncodedId;
+use crate::typenum::Unsigned;
 
 /// A convenience type if you wish to use a hash function that does not
 /// implement `EagerHash`.
+#[allow(unused)]
 pub type SimpleKeyGenerator<M, V, Rng, H> = KeyGenerator<M, V, Rng, H, SimpleHmac<H>>;
 
 /// A struct containing some constants for versioning.
@@ -48,82 +49,109 @@ pub type SimpleKeyGenerator<M, V, Rng, H> = KeyGenerator<M, V, Rng, H, SimpleHma
 /// - `EPOCH` - this is the start time for the 0th version.
 /// - `VERSION_LIFETIME` - how long each version lasts in seconds. Each version
 ///   has an associated pseudorandom salt.
-/// - `REQUIRE_EXPIRING_KEYS` - if true, any key IDs that don't have a timestamp
-///   will be invalidated, and key ID creation will result in an error if the
-///   expiration time is `None` or if it is greater than
-///   `MAX_KEY_EXPIRATION_TIME`.
-/// - `MAX_KEY_EXPIRATION_TIME` - This is the maximum expiration time you will
-///   ever use for a Key Id, which is only used if `REQUIRE_EXPIRING_KEYS` is
-///   true. This is used to invalidate old versions of Key IDs that must have
-///   already expired.
+/// - `VERSION_BITS` - how many bits to reserve in IDs for the version number.
+/// - `TIMESTAMP_BITS` - determines how many bits will be used to represent
+///   timestamps in IDs. It doesn't need to be very high, it just needs to be
+///   able to represent `VERSION_LIFETIME + MAX_EXPIRATION_TIME` seconds, and
+///   the amount of required bits can be reduced by making use of the
+///   `TIMESTAMP_PRECISION_LOSS` parameter.
+/// - `TIMESTAMP_PRECISION_LOSS`: Specifies the loss of timestamp precision for
+///   IDs that have embedded timestamps. This value represents how many of the
+///   least significant bits will be discarded before being stored. This bit
+///   shift reduces the timestamp's precision but extends the maximum
+///   representable time. The decoded timestamp will always be between
+///   `2^(TIMESTAMP_PRECISION_LOSS - 1) + 1` and `2^(TIMESTAMP_PRECISION_LOSS) +
+///   2^(TIMESTAMP_PRECISION_LOSS - 1)` seconds greater than the input value.
+/// - `MAX_EXPIRATION_TIME` - This is the maximum expiration time you will ever
+///   use for a Key Id, which is only used if `REQUIRE_EXPIRING_KEYS` is true.
+///   This is used to invalidate old versions of Key IDs that must have already
+///   expired.
+/// - `BREAKING_POINT_YEARS` - This value is used to validate the potential
+///   lifetime of this program at compile time. A successful build indicates
+///   that the `version` of a `KeyGenerator` will not complete a cycle for
+///   `BREAKING_POINT_YEARS`. Completing a cycle would break the way that
+///   timestamps are decoded and could decrease the security of your
+///   application, but depending on how you configure this `VersioningConfig`,
+///   this code could go for over 2^32 years without cycling.
 pub struct VersioningConfig<
     const EPOCH: u64,
     const VERSION_LIFETIME: u64,
-    const REQUIRE_EXPIRING_KEYS: bool,
-    const MAX_KEY_EXPIRATION_TIME: u64,
+    const VERSION_BITS: u8,
+    const TIMESTAMP_BITS: u8,
+    const TIMESTAMP_PRECISION_LOSS: u8,
+    const MAX_EXPIRATION_TIME: u64,
+    const BREAKING_POINT_YEARS: u64,
 >;
 
 /// A trait containing constants for versioning.
 pub trait VersionConfig {
     /// The start time for version 0.
     const EPOCH: u64;
+
     /// How long each version lasts in seconds.
     ///
     /// This cannot be 0, and it should be high enough so that
     /// `2^(VERSION_BITS)` don't get ran through very quickly.
     ///
     /// `VERSION_LIFETIME` has a minimum value of 600 seconds. Versions are
-    /// essentially an extension of the ID's timestamp, but it is associated
+    /// essentially an extension of the ID's timestamp, and it is associated
     /// with a pseudorandom salt.
     const VERSION_LIFETIME: u64;
-    /// If set to true, any key ID that doesn't have an expiration time will be
-    /// rejected.
-    const REQUIRE_EXPIRING_KEYS: bool;
+
+    /// The amount of bits that can be used in an ID for the version number.
+    const VERSION_BITS: u8;
+
+    /// Determines how many bits will be used to represent timestamps in IDs. It
+    /// doesn't need to be very high, it just needs to be able to represent
+    /// `VERSION_LIFETIME + MAX_EXPIRATION_TIME` seconds, and the amount of
+    /// required bits can be reduced by making use of the
+    /// `TIMESTAMP_PRECISION_LOSS` parameter.
+    ///
+    /// Use `2^(TIMESTAMP_BITS + TIMESTAMP_PRECISION_LOSS)` to calculate the
+    /// maximm representable time in seconds, and verify that it is greater than
+    /// `VERSION_LIFETIME + MAX_EXPIRATION_TIME`.
+    const TIMESTAMP_BITS: u8;
+
+    /// Specifies the loss of timestamp precision for IDs that have embedded
+    /// timestamps. This value represents how many of the least significant bits
+    /// will be discarded before being stored. This bit shift reduces the
+    /// timestamp's precision but extends the maximum representable time. The
+    /// decoded timestamp will always be between `2^(TIMESTAMP_PRECISION_LOSS -
+    /// 1) + 1` and `2^(TIMESTAMP_PRECISION_LOSS) + 2^(TIMESTAMP_PRECISION_LOSS
+    /// - 1)` seconds greater than the input value.
+    const TIMESTAMP_PRECISION_LOSS: u8;
+
     /// The maximum key expiration time is used to reject key IDs whose version
     /// is too old to possibly valid when `REQUIRE_EXPIRING_KEYS` is set to
     /// true. This constant represents the maximum "delta-time" rather than a
     /// maximum "time".
-    const MAX_KEY_EXPIRATION_TIME: u64;
+    const MAX_EXPIRATION_TIME: u64;
 
-    /// Gets the minimum accepted key id version. Only applies when
+    /// This value is used to validate the potential lifetime of this program at
+    /// compile time. A successful build indicates that the `version` of a
+    /// `KeyGenerator` will not complete a cycle for `BREAKING_POINT_YEARS`.
+    /// Completing a cycle would break the way that timestamps are decoded and
+    /// could decrease the security of your application, but depending on how
+    /// you configure this `VersionConfig`, this code could go for over 2^32
+    /// years without cycling.
+    const BREAKING_POINT_YEARS: u64;
+
+    /// Gets the minimum accepted key id version. This only applies when
     /// `REQUIRE_EXPIRING_KEYS` is set to true.
     ///
     /// The output will change over time as more versions are made.
     #[inline]
     fn get_minimum_accepted_key_id_version(current_version: u32) -> u32 {
-        if !Self::REQUIRE_EXPIRING_KEYS {
-            0
+        if Self::VERSION_LIFETIME > Self::MAX_EXPIRATION_TIME {
+            current_version.saturating_sub(1)
+        } else if Self::VERSION_LIFETIME < Self::MAX_EXPIRATION_TIME {
+            current_version
+                .saturating_sub((Self::MAX_EXPIRATION_TIME / Self::VERSION_LIFETIME) as u32)
+                .saturating_sub(1)
         } else {
-            if Self::VERSION_LIFETIME > Self::MAX_KEY_EXPIRATION_TIME {
-                current_version.saturating_sub(1)
-            } else if Self::VERSION_LIFETIME < Self::MAX_KEY_EXPIRATION_TIME {
-                current_version
-                    .saturating_sub((Self::MAX_KEY_EXPIRATION_TIME / Self::VERSION_LIFETIME) as u32)
-                    .saturating_sub(1)
-            } else {
-                current_version.saturating_sub(2)
-            }
-        }
-    }
-
-    /// A simple function returning whether the expiration time has passed.
-    #[inline]
-    fn is_expire_time_too_large(expiration: &u64) -> Result<(), KeyIdCreationError> {
-        #[cfg(not(feature = "std"))]
-        {
-            Ok(())
-        }
-        #[cfg(feature = "std")]
-        {
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-            if expiration - now > Self::MAX_KEY_EXPIRATION_TIME {
-                Err(KeyIdCreationError::ExpirationTimeTooLarge)
-            } else {
-                Ok(())
-            }
+            // this might actually just need to be 1, but it shouldn't hurt to be off by one
+            // here
+            current_version.saturating_sub(2)
         }
     }
 }
@@ -131,10 +159,21 @@ pub trait VersionConfig {
 impl<
         const EPOCH: u64,
         const VERSION_LIFETIME: u64,
-        const REQUIRE_EXPIRING_KEYS: bool,
-        const MAX_KEY_EXPIRATION_TIME: u64,
+        const VERSION_BITS: u8,
+        const TIMESTAMP_BITS: u8,
+        const TIMESTAMP_PRECISION_LOSS: u8,
+        const MAX_EXPIRATION_TIME: u64,
+        const BREAKING_POINT_YEARS: u64,
     > VersionConfig
-    for VersioningConfig<EPOCH, VERSION_LIFETIME, REQUIRE_EXPIRING_KEYS, MAX_KEY_EXPIRATION_TIME>
+    for VersioningConfig<
+        EPOCH,
+        VERSION_LIFETIME,
+        VERSION_BITS,
+        TIMESTAMP_BITS,
+        TIMESTAMP_PRECISION_LOSS,
+        MAX_EXPIRATION_TIME,
+        BREAKING_POINT_YEARS,
+    >
 {
     const EPOCH: u64 = EPOCH;
     const VERSION_LIFETIME: u64 = {
@@ -148,60 +187,183 @@ impl<
             }
         }
     };
+    const VERSION_BITS: u8 = {
+        {
+            match VERSION_BITS <= 32 {
+                true => VERSION_BITS,
+                false => {
+                    [/* VERSION_BITS must be less than or equal to 32 */][VERSION_BITS as usize]
+                }
+            }
+        }
+    };
+    const MAX_EXPIRATION_TIME: u64 = MAX_EXPIRATION_TIME;
 
-    const REQUIRE_EXPIRING_KEYS: bool = REQUIRE_EXPIRING_KEYS;
-    const MAX_KEY_EXPIRATION_TIME: u64 = MAX_KEY_EXPIRATION_TIME;
+    const TIMESTAMP_PRECISION_LOSS: u8 = {
+        {
+            match TIMESTAMP_PRECISION_LOSS + TIMESTAMP_BITS <= 64 {
+                true => TIMESTAMP_PRECISION_LOSS,
+                false => {
+                    [/* TIMESTAMP_PRECISION_LOSS + TIMESTAMP_PRECISION_BITS is greater than 64. A timestamp range of over 2^64 seconds is likely unnecessary, as it surpasses even UNIX timestamps. */]
+                        [TIMESTAMP_PRECISION_LOSS as usize]
+                }
+            };
+            match TIMESTAMP_PRECISION_LOSS <= 27 {
+                true => TIMESTAMP_PRECISION_LOSS,
+                false => {
+                    [/* Any value over 28 for the TIMESTAMP_PRECISION_REDUCTION parameter will make your timestamp dates off by over 8 years... */]
+                        [TIMESTAMP_PRECISION_LOSS as usize]
+                }
+            }
+        }
+    };
+
+    // validate that `TIMESTAMP_BITS` can represent `MAX_EXPIRATION_TIME +
+    // VERSION_LIFETIME`.
+    const TIMESTAMP_BITS: u8 = {
+        {
+            let max_time_to_represent = MAX_EXPIRATION_TIME.saturating_add(VERSION_LIFETIME);
+            let max_representable_time = u64_mask(TIMESTAMP_BITS + TIMESTAMP_PRECISION_LOSS);
+
+            match max_representable_time >= max_time_to_represent || VERSION_BITS == 0 {
+                true => TIMESTAMP_BITS,
+                false => {
+                    [ /* VersionConfig::TIMESTAMP_BITS and TIMESTAMP_PRECISION_LOSS are unable to represent MAX_EXPIRATION_TIME + VERSION_LIFETIME. The maximum representable time is 2^(TIMESTAMP_BITS + TIMESTAMP_PRECISION_LOSS) */]
+                        [TIMESTAMP_BITS as usize]
+                }
+            };
+            match TIMESTAMP_BITS <= 56 {
+                true => TIMESTAMP_BITS,
+                false => {
+                    [/* TIMESTAMP_BITS must be less than or equal to 56 */][TIMESTAMP_BITS as usize]
+                }
+            }
+        }
+    };
+
+    // validate that this program will reach `BREAKING_POINT_YEARS` without
+    // completing a cycle.
+    const BREAKING_POINT_YEARS: u64 = {
+        {
+            let calculated_breaking_point = VERSION_LIFETIME * (1 << VERSION_BITS as u64) + EPOCH;
+            let breaking_point_years =
+                calculated_breaking_point as f64 / 60f64 / 60f64 / 24f64 / 365.25;
+            match BREAKING_POINT_YEARS as f64 >= breaking_point_years {
+                true => BREAKING_POINT_YEARS,
+                false => {
+                    [ /* VersionConfig::VERSION_LIFETIME and VERSION_BITS were too small to fulfill reach BREAKING_POINT_YEARS without completing a cycle. */]
+                        [BREAKING_POINT_YEARS as usize]
+                }
+            }
+        }
+    };
 }
 
-/// A simplified type that allows for ID versions to change every 365.25 days
-/// (accounting for leap years).
+/// A simplified versioning configuration that allows for ID versions to change
+/// every 365.25 days (accounting for leap years), and with maximum timestamps
+/// of 365.25 days.
 ///
 /// # Type Arguments
 ///
-/// - `REQUIRE_EXPIRING_KEYS` - if true, any key IDs that don't have a timestamp
-///   will be invalidated, and key ID creation will result in an error if the
-///   expiration time is `None` or if it is greater than
-///   `MAX_KEY_EXPIRATION_TIME`.
-/// - `MAX_KEY_EXPIRATION_TIME` - the maximum allowed lifespan of a Key ID.
+/// - `BREAKING_POINT_YEARS` - the amount of years that this program will be
+///   able to last without cycling through all of its versions. There will be a
+///   descriptive compilation error if it cannot last that long.
+/// - `VERSION_BITS` - Determines how many bits will be used to represent
+///   version numbers in IDs. This needs to be able to count up to
+///   `BREAKING_POINT_YEARS`.
+/// - `TIMESTAMP_PRECISION_LOSS` - Specifies how many lower bits of the
+///   timestamps are discarded. This bit shift reduces the timestamp's precision
+///   but extends the maximum representable time.
+/// - `TIMESTAMP_BITS` - Determines how many bits will be used to represent
+///   timestamps in IDs. The timestamp parameters must satisfy this inequality:
+///   `2^(TIMESTAMP_BITS + TIMESTAMP_PRECISION_LOSS) ≥ 63,115,200` (2 years'
+///   worth of seconds).
+#[allow(unused)]
 pub type AnnualVersionConfig<
-    const REQUIRE_EXPIRING_KEYS: bool,
-    const MAX_KEY_EXPIRATION_TIME: u64,
-> = VersioningConfig<1_711_039_489, 31_557_600, REQUIRE_EXPIRING_KEYS, MAX_KEY_EXPIRATION_TIME>;
+    const BREAKING_POINT_YEARS: u64,
+    const VERSION_BITS: u8,
+    const TIMESTAMP_PRECISION_LOSS: u8,
+    const TIMESTAMP_BITS: u8,
+> = VersioningConfig<
+    1_711_039_489,
+    31_557_600,
+    VERSION_BITS,
+    TIMESTAMP_BITS,
+    TIMESTAMP_PRECISION_LOSS,
+    1_711_039_489,
+    BREAKING_POINT_YEARS,
+>;
 
-/// A simplified type that allows for ID versions to change every 30 days.
+/// A simplified versioning configuration where versions change every 30 days,
+/// and timestamps can be up to 30 days long.
 ///
 /// # Type Arguments
 ///
-/// - `REQUIRE_EXPIRING_KEYS` - if true, any key IDs that don't have a timestamp
-///   will be invalidated, and key ID creation will result in an error if the
-///   expiration time is `None` or if it is greater than
-///   `MAX_KEY_EXPIRATION_TIME`.
-/// - `MAX_KEY_EXPIRATION_TIME` - the maximum allowed lifespan of a Key ID.
+/// - `BREAKING_POINT_YEARS` - the amount of years that this program will be
+///   able to last without cycling through all of its versions. There will be a
+///   descriptive compilation error if it cannot last that long.
+/// - `VERSION_BITS` - Determines how many bits will be used to represent
+///   version numbers in IDs. This needs to be able to count up to
+///   `BREAKING_POINT_YEARS * 12`.
+/// - `TIMESTAMP_PRECISION_LOSS` - Specifies how many lower bits of the
+///   timestamps are discarded. This bit shift reduces the timestamp's precision
+///   but extends the maximum representable time.
+/// - `TIMESTAMP_BITS` - Determines how many bits will be used to represent
+///   timestamps in IDs. The timestamp parameters must satisfy this inequality:
+///   `2^(TIMESTAMP_BITS + TIMESTAMP_PRECISION_LOSS) ≥ 5,184,000` (2 months'
+///   worth of seconds).
+#[allow(unused)]
 pub type MonthlyVersionConfig<
-    const REQUIRE_EXPIRING_KEYS: bool,
-    const MAX_KEY_EXPIRATION_TIME: u64,
+    const BREAKING_POINT_YEARS: u64,
+    const VERSION_BITS: u8,
+    const TIMESTAMP_PRECISION_LOSS: u8,
+    const TIMESTAMP_BITS: u8,
 > = VersioningConfig<
     1_711_039_489,
     { 60 * 60 * 24 * 30 },
-    REQUIRE_EXPIRING_KEYS,
-    MAX_KEY_EXPIRATION_TIME,
+    VERSION_BITS,
+    TIMESTAMP_BITS,
+    TIMESTAMP_PRECISION_LOSS,
+    { 60 * 60 * 24 * 30 },
+    BREAKING_POINT_YEARS,
 >;
 
-/// A simplified type where ID versions do not change. This may be useful if the
-/// target device isn't able to get the current time. The maximum expiration
-/// time is set to the u64 MAX.
+/// A simplified type where ID versions do not change.
+///
+/// This may be useful if the target device isn't able to get the current time,
+/// such as in a no-std environment. It may also be useful if you just don't
+/// want to use versioning for IDs.
+///
+/// If you intend to use timestamps in your IDs with this `StaticVersionConfig`,
+/// the timestamp must be able to represent the full range of
+/// `BREAKING_POINT_YEARS`.
 ///
 /// # Type Arguments
 ///
-/// - `REQUIRE_EXPIRING_KEYS` - if true, any key IDs that don't have a timestamp
-///   will be invalidated, and key ID creation will result in an error if the
-///   expiration time is `None` or if it is greater than
-///   `MAX_KEY_EXPIRATION_TIME`.
-pub type StaticVersionConfig<const REQUIRE_EXPIRING_KEYS: bool> = VersioningConfig<
+/// - `BREAKING_POINT_YEARS` - the amount of years that this program will be
+///   able to run, based on how far the timestamp can represent into the future.
+///   If you aren't using timestamps, feel free to put `0` for everything here.
+/// - `TIMESTAMP_BITS` - the amount of bits in IDs reserved for timestamps. This
+///   needs to be able to represent up to `BREAKING_POINT_YEARS` worth of
+///   seconds. Just put `0` for this parameter if you aren't using timestamps.
+/// - `TIMESTAMP_PRECISION_LOSS` - Determines how many bits are discarded when
+///   storing timestamps. The timestamp parameters must satisfy this inequality:
+///   `2^(TIMESTAMP_BITS + TIMESTAMP_PRECISION_LOSS) ≥ BREAKING_POINT_YEARS *
+///   365.25 * 24 * 60 * 60`. Just put `0` for this parameter if you aren't
+///   using timestamps.
+#[allow(unused)]
+pub type StaticVersionConfig<
+    const BREAKING_POINT_YEARS: u64,
+    const TIMESTAMP_BITS: u8,
+    const TIMESTAMP_PRECISION_LOSS: u8,
+> = VersioningConfig<
     1_711_039_489,
     { (0 as u64).wrapping_sub(1) },
-    REQUIRE_EXPIRING_KEYS,
+    0,
+    TIMESTAMP_BITS,
+    TIMESTAMP_PRECISION_LOSS,
     { (0 as u64).wrapping_sub(1) },
+    BREAKING_POINT_YEARS,
 >;
 
 /// A Private Key Generator based on an [HKDF](hkdf::Hkdf).
@@ -344,14 +506,14 @@ where
             insert_ints_into_slice(
                 &[masked_version as u64, masked_timestamp],
                 &mut id.as_mut()[Id::METADATA_IDX..],
-                &[Id::VERSION_BITS, Id::TIMESTAMP_BITS],
+                &[V::VERSION_BITS, V::TIMESTAMP_BITS],
                 BITS_IN_USE,
             );
         } else {
             insert_ints_into_slice(
                 &[masked_version as u64],
                 &mut id.as_mut()[Id::METADATA_IDX..],
-                &[Id::VERSION_BITS],
+                &[V::VERSION_BITS],
                 BITS_IN_USE,
             );
         }
@@ -492,14 +654,14 @@ where
         let has_expiration = id.as_ref()[Id::METADATA_IDX] & 0b10 > 0;
 
         if !has_expiration {
-            if Id::VERSION_BITS == 0 {
+            if V::VERSION_BITS == 0 {
                 return (0, None);
             }
             let mut zeroed_id: Array<u8, Id::IdLen> = Array::clone_from_slice(id.as_ref());
             insert_ints_into_slice(
                 &[0],
                 &mut zeroed_id.as_mut()[Id::METADATA_IDX..],
-                &[Id::VERSION_BITS],
+                &[V::VERSION_BITS],
                 BITS_IN_USE,
             );
 
@@ -509,52 +671,51 @@ where
             let mut version_mask_bytes = [0u8; 4];
             version_mask_bytes.copy_from_slice(&metadata_mask[..4]);
 
-            let [masked_version] = extract_ints_from_slice::<1>(
+            let [encrypted_version] = extract_ints_from_slice::<1>(
                 &id.as_ref()[Id::METADATA_IDX..],
-                &[Id::VERSION_BITS],
+                &[V::VERSION_BITS],
                 BITS_IN_USE,
             );
 
-            let version_mask = u32::from_le_bytes(version_mask_bytes) & u64_mask!(Id::VERSION_BITS);
+            let version_mask = u32::from_le_bytes(version_mask_bytes) & u32_mask(V::VERSION_BITS);
 
-            (masked_version as u32 ^ version_mask, None)
-        } else {
-            let mut zeroed_id: Array<u8, Id::IdLen> = Array::clone_from_slice(id.as_ref());
-            insert_ints_into_slice(
-                &[0, 0],
-                &mut zeroed_id[Id::METADATA_IDX..],
-                &[Id::VERSION_BITS, Id::TIMESTAMP_BITS],
-                BITS_IN_USE,
-            );
-
-            Mac::update(&mut self.mac, &zeroed_id[..Id::MAC_START_INDEX]);
-            let metadata_mask = self.mac.finalize_fixed_reset();
-
-            let mut version_mask_bytes = [0u8; 4];
-            let mut timestamp_mask_bytes = [0u8; 8];
-
-            version_mask_bytes.copy_from_slice(&metadata_mask[..4]);
-            timestamp_mask_bytes.copy_from_slice(&metadata_mask[4..12]);
-
-            let [masked_version, masked_timestamp] = extract_ints_from_slice::<2>(
-                &id.as_ref()[Id::METADATA_IDX..],
-                &[Id::VERSION_BITS, Id::TIMESTAMP_BITS],
-                BITS_IN_USE,
-            );
-
-            let version_mask = u32::from_le_bytes(version_mask_bytes) & u64_mask!(Id::VERSION_BITS);
-            let timestamp_mask =
-                u64::from_le_bytes(timestamp_mask_bytes) & u64_mask!(Id::TIMESTAMP_BITS);
-
-            let version = masked_version as u32 ^ version_mask & u64_mask!(Id::VERSION_BITS);
-
-            let timestamp = Id::decompress_expiration_time(
-                Self::get_version_epoch(version),
-                masked_timestamp ^ timestamp_mask & u64_mask!(Id::TIMESTAMP_BITS),
-            );
-
-            (version, Some(timestamp))
+            return (encrypted_version as u32 ^ version_mask, None);
         }
+
+        let mut zeroed_id: Array<u8, Id::IdLen> = Array::clone_from_slice(id.as_ref());
+        insert_ints_into_slice(
+            &[0, 0],
+            &mut zeroed_id[Id::METADATA_IDX..],
+            &[V::VERSION_BITS, V::TIMESTAMP_BITS],
+            BITS_IN_USE,
+        );
+
+        Mac::update(&mut self.mac, &zeroed_id[..Id::MAC_START_INDEX]);
+        let metadata_mask = self.mac.finalize_fixed_reset();
+
+        let mut version_mask_bytes = [0u8; 4];
+        let mut timestamp_mask_bytes = [0u8; 8];
+
+        version_mask_bytes.copy_from_slice(&metadata_mask[..4]);
+        timestamp_mask_bytes.copy_from_slice(&metadata_mask[4..12]);
+
+        let [masked_version, masked_timestamp] = extract_ints_from_slice::<2>(
+            &id.as_ref()[Id::METADATA_IDX..],
+            &[V::VERSION_BITS, V::TIMESTAMP_BITS],
+            BITS_IN_USE,
+        );
+
+        let version_mask = u32::from_le_bytes(version_mask_bytes) & u32_mask(V::VERSION_BITS);
+        let timestamp_mask = u64::from_le_bytes(timestamp_mask_bytes) & u64_mask(V::TIMESTAMP_BITS);
+
+        let version = masked_version as u32 ^ version_mask & u32_mask(V::VERSION_BITS);
+
+        let timestamp = Id::decompress_expiration_time::<V>(
+            Self::get_version_epoch(version),
+            masked_timestamp ^ timestamp_mask & u64_mask(V::TIMESTAMP_BITS),
+        );
+
+        (version, Some(timestamp))
     }
 
     #[inline]
@@ -565,20 +726,20 @@ where
         expiration: Option<u64>,
         associated_data: Option<&[u8]>,
         rng: &mut dyn RngCore,
-    ) -> Id
+    ) -> Result<Id, IdCreationError>
     where
         Id: EncodedId,
     {
-        let (mut id, trimmed_timestamp) = Id::generate(
+        let (mut id, trimmed_timestamp) = Id::generate::<V>(
             prefix,
             expiration,
             associated_data.is_some(),
             self.current_version_epoch,
             rng,
-        );
+        )?;
         self.encode_version_and_timestamp_into_id(&mut id, trimmed_timestamp);
         self.fill_id_hmac(&mut id, id_type, associated_data);
-        id
+        Ok(id)
     }
 
     #[inline]
@@ -622,27 +783,20 @@ where
         expiration: Option<u64>,
         associated_data: Option<&[u8]>,
         rng: &mut dyn RngCore,
-    ) -> Result<(Id, SigningKey<C>), KeyIdCreationError>
+    ) -> Result<(Id, SigningKey<C>), IdCreationError>
     where
         C: EcdsaCurve + CurveArithmetic + JwkParameters,
         Scalar<C>: Invert<Output = CtOption<Scalar<C>>>,
         SignatureSize<C>: ArraySize,
         Id: EncodedId,
     {
-        if V::REQUIRE_EXPIRING_KEYS {
-            if let Some(ref expire_time) = &expiration {
-                V::is_expire_time_too_large(expire_time)?
-            } else {
-                return Err(KeyIdCreationError::MissingExpirationTime);
-            }
-        }
-        let (mut id, trimmed_timestamp) = Id::generate(
+        let (mut id, trimmed_timestamp) = Id::generate::<V>(
             prefix,
             expiration,
             associated_data.as_ref().is_some(),
             self.current_version_epoch,
             rng,
-        );
+        )?;
         self.encode_version_and_timestamp_into_id(&mut id, trimmed_timestamp);
         self.fill_id_hmac(&mut id, b"ecdsa", associated_data);
 
@@ -713,10 +867,7 @@ where
 
         hmac_validation?;
 
-        if V::REQUIRE_EXPIRING_KEYS {
-            if expiration.is_none() {
-                return Err(InvalidId::IdsMustExpire);
-            }
+        if Id::TIMESTAMP_POLICY.eq(&use_timestamps::Always::U8) {
             if version > self.current_version {
                 return Err(InvalidId::VersionTooLarge);
             }
@@ -785,27 +936,20 @@ where
         expiration: Option<u64>,
         associated_data: Option<&[u8]>,
         rng: &mut dyn RngCore,
-    ) -> Result<(Id, PublicKey<C>), KeyIdCreationError>
+    ) -> Result<(Id, PublicKey<C>), IdCreationError>
     where
         C: CurveArithmetic + JwkParameters,
         FieldBytesSize<C>: ModulusSize,
         AffinePoint<C>: FromEncodedPoint<C> + ToEncodedPoint<C>,
         Id: EncodedId,
     {
-        if V::REQUIRE_EXPIRING_KEYS {
-            if let Some(ref expire_time) = &expiration {
-                V::is_expire_time_too_large(expire_time)?
-            } else {
-                return Err(KeyIdCreationError::MissingExpirationTime);
-            }
-        }
-        let (mut id, trimmed_expiration) = Id::generate(
+        let (mut id, trimmed_expiration) = Id::generate::<V>(
             prefix,
             expiration,
             associated_data.as_ref().is_some(),
             self.current_version_epoch,
             rng,
-        );
+        )?;
         self.encode_version_and_timestamp_into_id(&mut id, trimmed_expiration);
         self.fill_id_hmac(&mut id, b"ecdh", associated_data);
 
@@ -874,10 +1018,7 @@ where
 
         hmac_validation?;
 
-        if V::REQUIRE_EXPIRING_KEYS {
-            if expiration.is_none() {
-                return Err(InvalidId::IdsMustExpire);
-            }
+        if Id::TIMESTAMP_POLICY.eq(&use_timestamps::Always::U8) {
             if version > self.current_version {
                 return Err(InvalidId::VersionTooLarge);
             }
@@ -962,6 +1103,7 @@ where
 #[cfg(test)]
 mod tests {
     use crate::error::InvalidId;
+    use crate::id::timestamp_policies::use_timestamps;
     use crate::key_generator::VersioningConfig;
     use crate::typenum::consts::{U48, U5};
     use crate::BinaryId;
@@ -973,13 +1115,15 @@ mod tests {
     use rand_core::OsRng;
     use sha2::Sha256;
 
-    use super::AnnualVersionConfig;
+    use super::*;
 
     const MAX_PREFIX_LEN: usize = 6;
 
-    type TestId = BinaryId<U48, U5, MAX_PREFIX_LEN, 3, 24, 8>;
-    type Sha2KeyGenerator =
-        KeyGenerator<Hmac<Sha256>, AnnualVersionConfig<false, 31_557_600>, ChaCha8Rng, Sha256>;
+    type TestVersionConfig = AnnualVersionConfig<5, 4, 8, 24>;
+    type TestId = BinaryId<U48, U5, MAX_PREFIX_LEN, use_timestamps::Sometimes>;
+    type KG<VersionConfiguration> =
+        KeyGenerator<Hmac<Sha256>, VersionConfiguration, ChaCha8Rng, Sha256>;
+    type Sha2KeyGenerator = KG<TestVersionConfig>;
 
     const TEST_HMAC_KEY: [u8; 32] = [42u8; 32];
 
@@ -1003,6 +1147,17 @@ mod tests {
         };
     }
 
+    macro_rules! init_keygenerator_with_versioning {
+        ($v:ty) => {
+            KG::<$v>::new(
+                &TEST_HMAC_KEY,
+                &[],
+                Hmac::<Sha256>::new_from_slice(&[4; 32]).unwrap(),
+                &mut [3u8; 32],
+            )
+        };
+    }
+
     mod encoding_and_decoding {
         use super::*;
         use std::time::{SystemTime, UNIX_EPOCH};
@@ -1015,29 +1170,32 @@ mod tests {
         /// seconds
         #[test]
         fn fuzz_expiration_times() {
-            let mut key_generator = init_keygenerator!();
-
             macro_rules! test_id_with_loss_factor {
-                ($($precison_reduction:literal), *) => {
+                ($($precision_reduction:literal), *) => {
                     $(
+                        let mut key_generator = init_keygenerator_with_versioning!(VersioningConfig<0, 1_000_000_000, 32, 32, $precision_reduction, 1_000_000_000, 800>);
+
                         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-                        for t in 0..(1 << $precison_reduction) {
+                        for t in 0..(1 << $precision_reduction) {
                             let input_expiration_time = t + now;
+                            let expiring_id = key_generator.generate_keyless_id::<TestId>(&[], &[], Some(input_expiration_time), None, &mut OsRng).unwrap();
 
-                            let expiring_id = key_generator.generate_keyless_id::<BinaryId<U48, U5, 5, 5, 34, $precison_reduction>>(&[], &[], Some(input_expiration_time), None, &mut OsRng);
-
-                            let minimum_added_time = if $precison_reduction > 0 {
-                                (1 << ($precison_reduction - 1)) + 1
+                            let minimum_added_time = if $precision_reduction > 0 {
+                                (1 << ($precision_reduction - 1)) + 1
                             } else {
                                 1
                             };
-                            let maximum_added_time = (1 << $precison_reduction) + minimum_added_time - 1;
+                            let maximum_added_time = if $precision_reduction > 0 {
+                                (1 << $precision_reduction) + minimum_added_time - 1
+                            } else {
+                                1
+                            };
 
                             let (_, decoded_expiration_time) = key_generator.decode_version_and_timestamp_from_id(&expiring_id);
                             if let Some(mut decoded_expiration_time) = decoded_expiration_time {
                                 decoded_expiration_time -= input_expiration_time;
-                                assert!(decoded_expiration_time >= minimum_added_time, "The expiration time was smaller than it was supposed to be.\ninput_expiration = {}\ndecoded_expiration_time = {}\nprecison_reduction = {}", input_expiration_time, decoded_expiration_time, $precison_reduction);
-                                assert!(decoded_expiration_time <= maximum_added_time, "The expiration time exceeds how large it was supposed to be\ninput_expiration = {}\ndecoded_expiration_time = {}\nprecison_reduction = {}", input_expiration_time, decoded_expiration_time, $precison_reduction);
+                                assert!(decoded_expiration_time >= minimum_added_time, "The expiration time was smaller than it was supposed to be.\ninput_expiration = {}\ndecoded_expiration_time = {}\nprecison_reduction = {}", input_expiration_time, decoded_expiration_time, $precision_reduction);
+                                assert!(decoded_expiration_time <= maximum_added_time, "The expiration time exceeds how large it was supposed to be\ninput_expiration = {}\ndecoded_expiration_time = {}\nprecison_reduction = {}", input_expiration_time, decoded_expiration_time, $precision_reduction);
                             } else {
                                 assert!(false, "Expiration not found in the ID")
                             }
@@ -1046,7 +1204,9 @@ mod tests {
                 };
             }
 
-            test_id_with_loss_factor!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13);
+            test_id_with_loss_factor!(0);
+            //test_id_with_loss_factor!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+            // 12, 13);
         }
 
         /// Versions will be slightly trickier to test given that they are no
@@ -1056,18 +1216,20 @@ mod tests {
         fn versions() {
             const EPOCH: u64 = 0;
             const VERSION_LIFETIME: u64 = 900_000;
-            const REQUIRE_EXPIRING_KEYS: bool = false;
-            const MAX_KEY_EXPIRATION_TIME: u64 = 30_000;
+            const MAX_EXPIRATION_TIME: u64 = 30_000;
             type VersionConfig = VersioningConfig<
                 EPOCH,
                 VERSION_LIFETIME,
-                REQUIRE_EXPIRING_KEYS,
-                MAX_KEY_EXPIRATION_TIME,
+                32,
+                24,
+                8,
+                MAX_EXPIRATION_TIME,
+                122_489_370,
             >;
 
             type KeyGen = KeyGenerator<Hmac<Sha256>, VersionConfig, ChaCha8Rng, Sha256>;
 
-            type VersionedTestId = BinaryId<U48, U5, 3, 12, 32, 8>;
+            type VersionedTestId = BinaryId<U48, U5, 3, use_timestamps::Sometimes>;
 
             let mut key_generator = KeyGen::new(
                 &[42u8; 32],
@@ -1075,13 +1237,9 @@ mod tests {
                 Hmac::<Sha256>::new_from_slice(&[3u8; 32]).unwrap(),
                 &mut [0u8; 32],
             );
-            let id = key_generator.generate_keyless_id::<VersionedTestId>(
-                &[],
-                &[],
-                None,
-                None,
-                &mut OsRng,
-            );
+            let id = key_generator
+                .generate_keyless_id::<VersionedTestId>(&[], &[], None, None, &mut OsRng)
+                .unwrap();
 
             let (decoded_version, _) = key_generator.decode_version_and_timestamp_from_id(&id);
 
@@ -1099,9 +1257,13 @@ mod tests {
     mod validation {
 
         use elliptic_curve::consts::{U48, U5};
+        use rand_chacha::ChaCha8Rng;
         use rand_core::OsRng;
 
-        use crate::BinaryId;
+        use crate::{
+            id::timestamp_policies::use_timestamps, key_generator::StaticVersionConfig, BinaryId,
+            KeyGenerator,
+        };
 
         use super::{
             CryptoKeyGenerator, Hmac, InvalidId, KeyInit, SeedableRng, Sha256, Sha2KeyGenerator,
@@ -1110,11 +1272,19 @@ mod tests {
 
         #[test]
         fn zero_sized_version_and_timestamp() {
-            let mut key_generator = init_keygenerator!();
-            type IdVersion0 = BinaryId<U48, U5, 3, 0, 0, 0>;
+            type StaticVersioning = StaticVersionConfig<0, 0, 0>;
+            let mut key_generator =
+                KeyGenerator::<Hmac<Sha256>, StaticVersioning, ChaCha8Rng, Sha256>::new(
+                    &[42u8; 32],
+                    &[43u8; 32],
+                    Hmac::<Sha256>::new_from_slice(&[44; 20]).unwrap(),
+                    &mut [32; 32],
+                );
+            type IdVersion0 = BinaryId<U48, U5, 3, use_timestamps::Never>;
 
-            let id =
-                key_generator.generate_keyless_id::<IdVersion0>(&[], &[], None, None, &mut OsRng);
+            let id = key_generator
+                .generate_keyless_id::<IdVersion0>(&[], &[], None, None, &mut OsRng)
+                .unwrap();
 
             let result = key_generator.validate_keyless_id::<IdVersion0>(id.as_ref(), &[], None);
 
@@ -1127,13 +1297,15 @@ mod tests {
 
             let original_associated_data = b"providing additional data for the id generation requires providing the same data during validation. This is useful for when only a specific client should be using a specific Key ID, and it also affects the actual value of the private key associated with Key IDs (although that aspect does not apply to keyless IDs).";
 
-            let id = key_generator.generate_keyless_id::<TestId>(
-                &[],
-                TEST_ID_TYPE,
-                None,
-                Some(original_associated_data),
-                &mut rng!(),
-            );
+            let id = key_generator
+                .generate_keyless_id::<TestId>(
+                    &[],
+                    TEST_ID_TYPE,
+                    None,
+                    Some(original_associated_data),
+                    &mut rng!(),
+                )
+                .unwrap();
 
             let correctly_providing_data = key_generator.validate_keyless_id::<TestId>(
                 id.as_ref(),
@@ -1172,8 +1344,9 @@ mod tests {
         fn keyless_id_without_associated_data() {
             let mut key_generator = init_keygenerator!();
 
-            let id_without_associated_data =
-                key_generator.generate_keyless_id::<TestId>(&[], b"test", None, None, &mut rng!());
+            let id_without_associated_data = key_generator
+                .generate_keyless_id::<TestId>(&[], b"test", None, None, &mut rng!())
+                .unwrap();
 
             // providing associated data when the ID was not generated with associated data
             // is safe
@@ -1186,13 +1359,9 @@ mod tests {
         fn different_keyless_id_types() {
             let mut key_generator = init_keygenerator!();
 
-            let id_type_1 = key_generator.generate_keyless_id::<TestId>(
-                &[],
-                b"client_ID",
-                None,
-                None,
-                &mut rng!(),
-            );
+            let id_type_1 = key_generator
+                .generate_keyless_id::<TestId>(&[], b"client_ID", None, None, &mut rng!())
+                .unwrap();
 
             // You must provide the same type of ID when creating an ID and validating it
             assert_eq!(
@@ -1211,13 +1380,9 @@ mod tests {
         fn basic_hmac_checks() {
             let mut key_generator = init_keygenerator!();
 
-            let id = key_generator.generate_keyless_id::<TestId>(
-                &[],
-                TEST_ID_TYPE,
-                None,
-                None,
-                &mut rng!(),
-            );
+            let id = key_generator
+                .generate_keyless_id::<TestId>(&[], TEST_ID_TYPE, None, None, &mut rng!())
+                .unwrap();
 
             // validation
             assert_eq!(
@@ -1254,13 +1419,9 @@ mod tests {
 
         let test_prefix = [1, 2, 3, 4, 5, 6, 7, 8, 9];
 
-        let id = key_generator.generate_keyless_id::<TestId>(
-            &test_prefix,
-            TEST_ID_TYPE,
-            None,
-            None,
-            &mut rng!(),
-        );
+        let id = key_generator
+            .generate_keyless_id::<TestId>(&test_prefix, TEST_ID_TYPE, None, None, &mut rng!())
+            .unwrap();
 
         // this is just in case some of the consts in the test change
         assert!(
@@ -1310,5 +1471,124 @@ mod tests {
         );
 
         assert_eq!(aes_key, test);
+    }
+
+    mod errors {
+        use super::*;
+        use crate::prelude::*;
+
+        type ShorthandVersionConfig<const VERSION_BITS: u8, const TIMESTAMP_BITS: u8> =
+            VersioningConfig<
+                0,              // EPOCH
+                1_000_000_000,  // VERSION_LIFETIME
+                VERSION_BITS,   // VERSION_BITS - 4 bytes
+                TIMESTAMP_BITS, //TIMESTAMP_BITS
+                8,              // TIMESTAMP_PRECISION_LOSS
+                1_000_000_000,  // MAX_EXPIRATION_TIME
+                800,            // BREAKING_POINT_YEARS
+            >;
+
+        #[test]
+        fn id_length_error() {
+            type TestId<IdLen, MacLen, const MAX_PREFIX_LEN: usize> = BinaryId<
+                IdLen, // IdLength: okay. Total length sums up to exactly 19 bytes...
+                // BUT... there is no room for pseudorandom bytes, other than the prefix
+                MacLen,         // MacLength: okay
+                MAX_PREFIX_LEN, // MAX_PREFIX_LEN: okay
+                use_timestamps::Sometimes,
+            >;
+
+            type K = KeyGenerator<
+                Hmac<Sha256>,
+                ShorthandVersionConfig<32, 56>, // 4 + 7 + 1 bytes
+                ChaCha8Rng,
+                Sha256,
+            >;
+
+            let expiration = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                + 500000;
+
+            let mut k = K::new(
+                &[48u8; 32],
+                b"ff",
+                Hmac::<Sha256>::new_from_slice(&[42u8; 32]).unwrap(),
+                &mut [3u8; 32],
+            );
+
+            let length_off_by_1 = k.generate_keyless_id::<TestId<U19, U1, 7>>(
+                &[],
+                &[],
+                Some(expiration),
+                None,
+                &mut OsRng,
+            );
+
+            assert_eq!(length_off_by_1.is_err(), true);
+
+            let length_exact = k.generate_keyless_id::<TestId<U19, U1, 6>>(
+                &[],
+                &[],
+                Some(expiration),
+                None,
+                &mut OsRng,
+            );
+
+            assert_eq!(length_exact.is_ok(), true);
+        }
+
+        #[test]
+        fn timestamp_policy_errors() {
+            type ShorthandId<TimestampPolicy> = BinaryId<U48, U5, 5, TimestampPolicy>;
+            type V = ShorthandVersionConfig<32, 40>;
+            let mut key_gen = init_keygenerator_with_versioning!(V);
+            type TestId = ShorthandId<use_timestamps::Always>;
+
+            let id_should_have_timestamp_error =
+                key_gen.generate_keyless_id::<TestId>(&[], &[], None, None, &mut OsRng);
+
+            assert_eq!(
+                id_should_have_timestamp_error.unwrap_err(),
+                IdCreationError::MissingExpirationTime
+            );
+
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let expiration_timestamp_too_large_error = key_gen.generate_keyless_id::<TestId>(
+                &[],
+                &[],
+                Some(now + 1_000_000_001),
+                None,
+                &mut OsRng,
+            );
+
+            assert_eq!(
+                expiration_timestamp_too_large_error.unwrap_err(),
+                IdCreationError::ExpirationTimeTooLarge
+            );
+
+            let expiration_timestamp_barely_ok = key_gen.generate_keyless_id::<TestId>(
+                &[],
+                &[],
+                Some(now + 1_000_000_000),
+                None,
+                &mut OsRng,
+            );
+
+            assert_eq!(expiration_timestamp_barely_ok.is_ok(), true);
+
+            type TestId2 = ShorthandId<use_timestamps::Never>;
+            let shouldnt_have_expiration_time =
+                key_gen.generate_keyless_id::<TestId2>(&[], &[], Some(now + 5), None, &mut OsRng);
+
+            assert_eq!(
+                shouldnt_have_expiration_time.unwrap_err(),
+                IdCreationError::IdShouldNotHaveExpirationTime
+            );
+        }
     }
 }

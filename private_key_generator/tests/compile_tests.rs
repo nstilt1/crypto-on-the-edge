@@ -11,6 +11,13 @@ fn test_compile_errors() {
 }
 
 #[test]
+fn compiler_error_dbg() {
+    let t = TestCases::new();
+    t.pass("tests/empty.rs");
+    t.compile_fail("tests/compile_fails/version_lifetime_too_short.rs")
+}
+
+#[test]
 fn test_compilation() {
     let t = TestCases::new();
 
