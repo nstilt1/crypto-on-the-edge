@@ -12,12 +12,9 @@ use elliptic_curve::{
     sec1::{FromEncodedPoint, ModulusSize, ToEncodedPoint},
     AffinePoint, CurveArithmetic, FieldBytesSize, JwkParameters, PublicKey, Scalar,
 };
-use hkdf::hmac::{
-    digest::{
-        array::{Array, ArraySize},
-        OutputSizeUser,
-    },
-    Mac,
+use hkdf::hmac::digest::{
+    array::{Array, ArraySize},
+    FixedOutputReset, KeyInit, Mac, OutputSizeUser,
 };
 use rand_chacha::{rand_core::SeedableRng, ChaCha12Rng, ChaCha20Rng, ChaCha8Rng};
 use subtle::CtOption;
@@ -108,10 +105,14 @@ pub trait EncodedId:
 /// RNG for generating salts, and it is both seedable and capable of using a
 /// nonce, it could be added here.
 pub trait AllowedRngs {
-    type Seed: Zeroize;
+    type Seed: Default + Zeroize + AsMut<[u8]>;
 
     /// Initializes an Rng and zeroizes the seed
     fn init_rng(seed: &mut Self::Seed) -> Self;
+
+    fn set_seed(seed: &mut Self::Seed) -> &mut [u8] {
+        seed.as_mut()
+    }
 
     /// Outputs the salt to be used for a specific version
     fn get_version_salt(&mut self, version: u32, output_salt: &mut [u8]);
@@ -146,7 +147,7 @@ pub trait CryptoKeyGenerator: Sized {
     type HkdfDigest: OutputSizeUser;
 
     /// The MAC used for generating and validating IDs
-    type Mac: Mac;
+    type Mac: Mac + KeyInit + FixedOutputReset;
 
     /// The RNG used for generating version salts/nonces.
     type Rng: AllowedRngs;
@@ -155,13 +156,8 @@ pub trait CryptoKeyGenerator: Sized {
     /// discards the PRK value.
     ///
     /// See [Hkdf::new()](hkdf::Hkdf::new).
-    fn new(
-        hkdf_key: &[u8],
-        application_id: &[u8],
-        mac: Self::Mac,
-        rng_seed: &mut <Self::Rng as AllowedRngs>::Seed,
-    ) -> Self {
-        let (_, hkdf) = Self::extract(hkdf_key, application_id, mac, rng_seed);
+    fn new(hkdf_key: &[u8], application_id: &[u8]) -> Self {
+        let (_, hkdf) = Self::extract(hkdf_key, application_id);
         hkdf
     }
 
@@ -179,8 +175,6 @@ pub trait CryptoKeyGenerator: Sized {
     ///   the hash function's internal buffer[^note].
     /// * `application_id` - an arbitrary application-specific value which does
     ///   not need to be an actual identifier.
-    /// * `mac` - an instance of a MAC
-    /// * `rng_seed` - an RNG seed
     ///
     /// # Recommended key length bounds
     /// Here are the recommended minimum and maximum key length boundaries for
@@ -206,8 +200,6 @@ pub trait CryptoKeyGenerator: Sized {
     fn extract(
         hkdf_key: &[u8],
         application_id: &[u8],
-        mac: Self::Mac,
-        rng_seed: &mut <Self::Rng as AllowedRngs>::Seed,
     ) -> (
         Array<u8, <Self::HkdfDigest as OutputSizeUser>::OutputSize>,
         Self,
@@ -224,17 +216,11 @@ pub trait CryptoKeyGenerator: Sized {
     ///
     /// * `prk` - This value must be cryptographically strong, and the length
     ///   must be at least the output size of the hash function used.
-    /// * `mac` - an instance of a MAC
-    /// * `rng_seed` - the RNG seed
     ///
     /// # Panics
     /// This panics when the `prk`'s length is less than the output size of the
     /// hash function.
-    fn from_prk(
-        prk: &[u8],
-        mac: Self::Mac,
-        rng_seed: &mut <Self::Rng as AllowedRngs>::Seed,
-    ) -> Self;
+    fn from_prk(prk: &[u8]) -> Self;
 
     /// Decodes the version from the ID, as well as a timestamp if there is one.
     ///

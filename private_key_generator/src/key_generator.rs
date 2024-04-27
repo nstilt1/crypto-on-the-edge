@@ -20,7 +20,7 @@ use hkdf::{
     hmac::{
         digest::{
             array::{Array, ArraySize},
-            FixedOutputReset, Output, OutputSizeUser,
+            FixedOutputReset, Key, KeyInit, Output, OutputSizeUser,
         },
         Hmac, Mac, SimpleHmac,
     },
@@ -28,7 +28,7 @@ use hkdf::{
 };
 use rand_core::RngCore;
 use subtle::{ConstantTimeEq, CtOption};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use core::marker::PhantomData;
 #[cfg(feature = "std")]
@@ -407,7 +407,7 @@ pub type StaticVersionConfig<
 /// ```
 pub struct KeyGenerator<M, V, Rng, HkdfDigest, I = Hmac<HkdfDigest>>
 where
-    M: Mac + FixedOutputReset,
+    M: Mac + KeyInit + FixedOutputReset,
     V: VersionConfig,
     Rng: AllowedRngs,
     HkdfDigest: OutputSizeUser,
@@ -424,9 +424,32 @@ where
     rng: Rng,
 }
 
+impl<M, V, R, HkdfDigest, I> Drop for KeyGenerator<M, V, R, HkdfDigest, I>
+where
+    M: Mac + KeyInit + FixedOutputReset,
+    V: VersionConfig,
+    R: AllowedRngs,
+    HkdfDigest: OutputSizeUser,
+    I: HmacImpl<HkdfDigest>,
+{
+    fn drop(&mut self) {
+        self.current_version_salt.zeroize();
+    }
+}
+
+impl<M, V, R, HkdfDigest, I> ZeroizeOnDrop for KeyGenerator<M, V, R, HkdfDigest, I>
+where
+    M: Mac + KeyInit + FixedOutputReset,
+    V: VersionConfig,
+    R: AllowedRngs,
+    HkdfDigest: OutputSizeUser,
+    I: HmacImpl<HkdfDigest>,
+{
+}
+
 impl<M, V, R, HkdfDigest, I> KeyGenerator<M, V, R, HkdfDigest, I>
 where
-    M: Mac + FixedOutputReset,
+    M: Mac + KeyInit + FixedOutputReset,
     V: VersionConfig,
     R: AllowedRngs,
     HkdfDigest: OutputSizeUser,
@@ -587,7 +610,7 @@ where
 
 impl<M, V, R, HkdfDigest, I> CryptoKeyGenerator for KeyGenerator<M, V, R, HkdfDigest, I>
 where
-    M: Mac + FixedOutputReset,
+    M: Mac + FixedOutputReset + KeyInit,
     V: VersionConfig,
     R: AllowedRngs,
     HkdfDigest: OutputSizeUser,
@@ -601,15 +624,32 @@ where
     fn extract(
         hkdf_key: &[u8],
         application_id: &[u8],
-        mac: M,
-        rng_seed: &mut R::Seed,
     ) -> (
         Array<u8, <Self::HkdfDigest as OutputSizeUser>::OutputSize>,
         Self,
     ) {
-        let (prk, hkdf) = Hkdf::<HkdfDigest, I>::extract(Some(hkdf_key), application_id);
+        let (prk, lvl_1_hkdf) = Hkdf::<HkdfDigest, I>::extract(Some(hkdf_key), application_id);
+
+        let mut kdf_prk: Output<HkdfDigest> = Default::default();
+        let mut mac_key: Key<M> = Default::default();
+        let mut rng_seed: R::Seed = Default::default();
+
+        lvl_1_hkdf
+            .expand(b"lvl 2 kdf prk", kdf_prk.as_mut())
+            .expect("kdf_prk should be small enough");
+        lvl_1_hkdf
+            .expand(b"lvl 2 mac", mac_key.as_mut())
+            .expect("mac key should be small enough");
+        lvl_1_hkdf
+            .expand(b"lvl 2 rng", &mut R::set_seed(&mut rng_seed))
+            .expect("seed should be small enough");
+
+        let hkdf =
+            Hkdf::<HkdfDigest, I>::from_prk(&kdf_prk).expect("This key should be long enough");
+        let mac = M::new_from_slice(&mac_key).expect("This key should be the correct length");
+        let mut rng = R::init_rng(&mut rng_seed);
+
         let current_version = Self::get_current_version();
-        let mut rng = R::init_rng(rng_seed);
         let mut salt: Output<HkdfDigest> = Default::default();
         R::get_version_salt(&mut rng, current_version, &mut salt);
         (
@@ -627,16 +667,36 @@ where
     }
 
     #[inline]
-    fn from_prk(prk: &[u8], mac: M, rng_seed: &mut R::Seed) -> Self {
+    fn from_prk(prk: &[u8]) -> Self {
+        let lvl_1_hkdf =
+            Hkdf::<HkdfDigest, I>::from_prk(prk).expect("The prk was not strong enough");
+
+        let mut kdf_prk: Output<HkdfDigest> = Default::default();
+        let mut mac_key: Key<M> = Default::default();
+        let mut rng_seed: R::Seed = Default::default();
+
+        lvl_1_hkdf
+            .expand(b"lvl 2 kdf prk", &mut kdf_prk)
+            .expect("kdf prk should be small enough");
+        lvl_1_hkdf
+            .expand(b"lvl 2 mac", &mut mac_key)
+            .expect("mac key should be small enough");
+        lvl_1_hkdf
+            .expand(b"lvl 2 rng", &mut R::set_seed(&mut rng_seed))
+            .expect("seed should be small enough");
+
+        let mac = M::new_from_slice(&mac_key).expect("This key should be the correct length");
+        let mut rng = R::init_rng(&mut rng_seed);
+
         let current_version = Self::get_current_version();
-        let mut rng = R::init_rng(rng_seed);
         let mut salt: Output<HkdfDigest> = Default::default();
         R::get_version_salt(&mut rng, current_version, &mut salt);
         Self {
-            hkdf: Hkdf::<HkdfDigest, I>::from_prk(prk).expect("Your prk was not strong enough"),
+            hkdf: Hkdf::<HkdfDigest, I>::from_prk(&kdf_prk)
+                .expect("Your prk was not strong enough"),
             mac,
             _versioning_config: PhantomData,
-            rng: R::init_rng(rng_seed),
+            rng,
             current_version,
             current_version_epoch: Self::get_version_epoch(current_version),
             current_version_salt: salt,
@@ -1108,7 +1168,7 @@ mod tests {
     use crate::typenum::consts::{U48, U5};
     use crate::BinaryId;
     use crate::{traits::CryptoKeyGenerator, KeyGenerator};
-    use hkdf::hmac::{Hmac, KeyInit};
+    use hkdf::hmac::Hmac;
     use rand::rngs::StdRng;
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
@@ -1138,23 +1198,13 @@ mod tests {
 
     macro_rules! init_keygenerator {
         () => {
-            Sha2KeyGenerator::new(
-                &TEST_HMAC_KEY,
-                &[],
-                Hmac::<Sha256>::new_from_slice(&[4; 32]).unwrap(),
-                &mut [3u8; 32],
-            )
+            Sha2KeyGenerator::new(&TEST_HMAC_KEY, &[])
         };
     }
 
     macro_rules! init_keygenerator_with_versioning {
         ($v:ty) => {
-            KG::<$v>::new(
-                &TEST_HMAC_KEY,
-                &[],
-                Hmac::<Sha256>::new_from_slice(&[4; 32]).unwrap(),
-                &mut [3u8; 32],
-            )
+            KG::<$v>::new(&TEST_HMAC_KEY, &[])
         };
     }
 
@@ -1231,12 +1281,7 @@ mod tests {
 
             type VersionedTestId = BinaryId<U48, U5, 3, use_timestamps::Sometimes>;
 
-            let mut key_generator = KeyGen::new(
-                &[42u8; 32],
-                b"",
-                Hmac::<Sha256>::new_from_slice(&[3u8; 32]).unwrap(),
-                &mut [0u8; 32],
-            );
+            let mut key_generator = KeyGen::new(&[42u8; 32], b"");
             let id = key_generator
                 .generate_keyless_id::<VersionedTestId>(&[], &[], None, None, &mut OsRng)
                 .unwrap();
@@ -1266,8 +1311,8 @@ mod tests {
         };
 
         use super::{
-            CryptoKeyGenerator, Hmac, InvalidId, KeyInit, SeedableRng, Sha256, Sha2KeyGenerator,
-            StdRng, TestId, TEST_HMAC_KEY, TEST_ID_TYPE,
+            CryptoKeyGenerator, Hmac, InvalidId, SeedableRng, Sha256, Sha2KeyGenerator, StdRng,
+            TestId, TEST_HMAC_KEY, TEST_ID_TYPE,
         };
 
         #[test]
@@ -1276,9 +1321,7 @@ mod tests {
             let mut key_generator =
                 KeyGenerator::<Hmac<Sha256>, StaticVersioning, ChaCha8Rng, Sha256>::new(
                     &[42u8; 32],
-                    &[43u8; 32],
-                    Hmac::<Sha256>::new_from_slice(&[44; 20]).unwrap(),
-                    &mut [32; 32],
+                    &[43; 32],
                 );
             type IdVersion0 = BinaryId<U48, U5, 3, use_timestamps::Never>;
 
@@ -1511,12 +1554,7 @@ mod tests {
                 .as_secs()
                 + 500000;
 
-            let mut k = K::new(
-                &[48u8; 32],
-                b"ff",
-                Hmac::<Sha256>::new_from_slice(&[42u8; 32]).unwrap(),
-                &mut [3u8; 32],
-            );
+            let mut k = K::new(&[48u8; 32], b"ff");
 
             let length_off_by_1 = k.generate_keyless_id::<TestId<U19, U1, 7>>(
                 &[],

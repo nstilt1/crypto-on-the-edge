@@ -1,5 +1,5 @@
 use private_key_generator::prelude::*;
-use hkdf::hmac::{Hmac, KeyInit};
+use hkdf::hmac::Hmac;
 use rand_chacha::ChaCha8Rng;
 use rand::rngs::OsRng;
 use sha2::Sha256;
@@ -25,6 +25,6 @@ type InvalidTimestampBitsConfig = VersioningConfig<
 fn main() {
     type K = KeyGenerator<Hmac<Sha256>, InvalidTimestampBitsConfig, ChaCha8Rng, Sha256>;
 
-    let mut k = K::new(&[48u8; 32], b"ff", Hmac::<Sha256>::new_from_slice(&[42u8; 32]).unwrap(), &mut [3u8; 32]);
+    let mut k = K::new(&[48u8; 32], b"ff");
     let _id = k.generate_keyless_id::<TestId>(&[], &[], None, None, &mut OsRng);
 }
