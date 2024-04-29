@@ -16,6 +16,7 @@ use hkdf::hmac::digest::{
     array::{Array, ArraySize},
     FixedOutputReset, KeyInit, Mac, OutputSizeUser,
 };
+use init_boxed::CfgBoxed;
 use rand_chacha::{rand_core::SeedableRng, ChaCha12Rng, ChaCha20Rng, ChaCha8Rng};
 use subtle::CtOption;
 use zeroize::Zeroize;
@@ -156,7 +157,7 @@ pub trait CryptoKeyGenerator: Sized {
     /// discards the PRK value.
     ///
     /// See [Hkdf::new()](hkdf::Hkdf::new).
-    fn new(hkdf_key: &[u8], application_id: &[u8]) -> Self {
+    fn new(hkdf_key: &[u8], application_id: &[u8]) -> CfgBoxed<Self> {
         let (_, hkdf) = Self::extract(hkdf_key, application_id);
         hkdf
     }
@@ -202,7 +203,7 @@ pub trait CryptoKeyGenerator: Sized {
         application_id: &[u8],
     ) -> (
         Array<u8, <Self::HkdfDigest as OutputSizeUser>::OutputSize>,
-        Self,
+        CfgBoxed<Self>,
     );
 
     /// Initializes a `CryptoKeyGenerator` from a pseudorandom key. See
@@ -220,7 +221,7 @@ pub trait CryptoKeyGenerator: Sized {
     /// # Panics
     /// This panics when the `prk`'s length is less than the output size of the
     /// hash function.
-    fn from_prk(prk: &[u8]) -> Self;
+    fn from_prk(prk: &[u8]) -> CfgBoxed<Self>;
 
     /// Decodes the version from the ID, as well as a timestamp if there is one.
     ///

@@ -335,6 +335,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "init_boxed"
+version = "0.1.0"
+dependencies = [
+ "zeroize",
+]
+
+[[package]]
 name = "itertools"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -449,6 +456,7 @@ dependencies = [
  "ecdsa",
  "elliptic-curve",
  "hkdf",
+ "init_boxed",
  "rand",
  "rand_chacha",
  "rand_core",
@@ -466,6 +474,7 @@ dependencies = [
  "ecdsa",
  "elliptic-curve",
  "hkdf",
+ "init_boxed",
  "rand",
  "rand_chacha",
  "rand_core",
