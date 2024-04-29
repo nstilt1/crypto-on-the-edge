@@ -474,7 +474,6 @@ dependencies = [
  "ecdsa",
  "elliptic-curve",
  "hkdf",
- "init_boxed",
  "rand",
  "rand_chacha",
  "rand_core",

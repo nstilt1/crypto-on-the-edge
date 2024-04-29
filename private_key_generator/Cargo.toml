@@ -38,5 +38,6 @@ sha2 = "0.11.0-pre.3"
 trybuild = "1"
 
 [features]
+alloc = ["init_boxed/alloc"]
 default = ["std"]
 std = ["hkdf/std"] # std is required for checking timestamps against UNIX_EPOCH
