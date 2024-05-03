@@ -3,7 +3,8 @@
 
 use core::marker::PhantomData;
 use private_key_generator::{
-    ecdsa::{hazmat::DigestPrimitive, signature::Signer, EcdsaCurve, Signature, SignatureSize}, elliptic_curve::{
+    ecdsa::{hazmat::DigestPrimitive, signature::Signer, EcdsaCurve, Signature, SignatureSize},
+    elliptic_curve::{
         array::ArraySize,
         ops::Invert,
         point::PointCompression,
@@ -11,7 +12,10 @@ use private_key_generator::{
         subtle::CtOption,
         zeroize::{Zeroize, ZeroizeOnDrop},
         AffinePoint, CurveArithmetic, FieldBytesSize, JwkParameters, PublicKey, Scalar,
-    }, error::IdCreationError, hkdf::hmac::digest::{core_api::BlockSizeUser, Output as HashOutput}, typenum::Unsigned, CryptoKeyGenerator, Digest, EncodedId
+    },
+    hkdf::hmac::digest::{core_api::BlockSizeUser, Output as HashOutput},
+    typenum::Unsigned,
+    CryptoKeyGenerator, Digest, EncodedId,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -47,9 +51,10 @@ macro_rules! new_key_manager {
             nonce: Vec::new(),
             rng: FastRng::from_entropy(),
             client_id: CId::default(),
-            ecdsa_key_id: KId::default(),
+            ecdsa_key_id: EcdsaKId::default(),
             is_handshake: false,
             _ecdh: PhantomData,
+            _ecdh_key_id: PhantomData,
             _ecdh_kdf: PhantomData,
             _ecdsa: PhantomData,
             b64_engine: $b64,
@@ -73,13 +78,23 @@ macro_rules! new_key_manager {
 /// * `EcdhKdfDigest` - The digest to use in an HKDF during ECDH
 /// * `Ecdsa` - the ECDSA curve you want to use
 /// * `ClientId` - the ID type for your clients
-/// * `KeyId` - the ID type for your keys
+/// * `EcdhKeyId` - the ID type for your ECDH keys
+/// * `EcdsaKeyId` - the ID type for your ECDSA Keys
+/// * `FastRng` - any RNG that impls `CrytpoRngCore` and `SeedableRng`
 ///
 /// # Examples
 /// ```rust
 /// ```
-pub struct HttpPrivateKeyManager<KeyGen, Ecdh, EcdhKdfDigest, Ecdsa, ClientId, KeyId, FastRng>
-where
+pub struct HttpPrivateKeyManager<
+    KeyGen,
+    Ecdh,
+    EcdhKdfDigest,
+    Ecdsa,
+    ClientId,
+    EcdhKeyId,
+    EcdsaKeyId,
+    FastRng,
+> where
     KeyGen: CryptoKeyGenerator,
     Ecdh: CurveArithmetic + JwkParameters + PointCompression,
     FieldBytesSize<Ecdh>: ModulusSize,
@@ -89,7 +104,8 @@ where
     Scalar<Ecdsa>: Invert<Output = CtOption<Scalar<Ecdsa>>>,
     SignatureSize<Ecdsa>: ArraySize,
     ClientId: EncodedId,
-    KeyId: EncodedId,
+    EcdhKeyId: EncodedId,
+    EcdsaKeyId: EncodedId,
     FastRng: CryptoRngCore + SeedableRng,
 {
     /// the key generator. You may use this directly if you need to.
@@ -103,18 +119,19 @@ where
     pub rng: FastRng,
     client_id: ClientId,
     // the current ecdsa key ID for this request
-    ecdsa_key_id: KeyId,
+    ecdsa_key_id: EcdsaKeyId,
     // determines whether the current instance is dealing with a handshake
     is_handshake: bool,
     _ecdh: PhantomData<Ecdh>,
+    _ecdh_key_id: PhantomData<EcdhKeyId>,
     _ecdh_kdf: PhantomData<EcdhKdfDigest>,
     _ecdsa: PhantomData<Ecdsa>,
     /// the base64 engine this struct uses
     pub b64_engine: GeneralPurpose,
 }
 
-impl<KeyGen, Ecdh, EcdhKdf, Ecdsa, CId, KId, FastRng>
-    HttpPrivateKeyManager<KeyGen, Ecdh, EcdhKdf, Ecdsa, CId, KId, FastRng>
+impl<KeyGen, Ecdh, EcdhKdf, Ecdsa, CId, EcdhKId, EcdsaKId, FastRng>
+    HttpPrivateKeyManager<KeyGen, Ecdh, EcdhKdf, Ecdsa, CId, EcdhKId, EcdsaKId, FastRng>
 where
     KeyGen: CryptoKeyGenerator,
     Ecdh: CurveArithmetic + JwkParameters + PointCompression,
@@ -125,7 +142,8 @@ where
     Scalar<Ecdsa>: Invert<Output = CtOption<Scalar<Ecdsa>>>,
     SignatureSize<Ecdsa>: ArraySize,
     CId: EncodedId,
-    KId: EncodedId,
+    EcdhKId: EncodedId,
+    EcdsaKId: EncodedId,
     FastRng: CryptoRngCore + SeedableRng,
 {
     /// Initializes this structure using your Key Generator.
@@ -157,20 +175,32 @@ where
     ///
     /// * `count` - the amount of public keys you want to generate
     /// * `expiration` - the expiration time of these new keys
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if there is an issue with the expiration time, such as
+    /// if it:
+    ///
+    /// * should or should not be present based on the EcdhKey Id type's
+    ///   specifications
+    /// * is larger than MAX_KEY_EXPIRATION_TIME
     pub fn generate_ecdh_pubkeys_and_ids(
         &mut self,
         count: usize,
         expiration: Option<u64>,
-    ) -> Result<Vec<(KId, PublicKey<Ecdh>)>, IdCreationError> {
-        let mut output: Vec<(KId, PublicKey<Ecdh>)> = Vec::with_capacity(count);
+    ) -> Result<Vec<(EcdhKId, PublicKey<Ecdh>)>, ProtocolError> {
+        let mut output: Vec<(EcdhKId, PublicKey<Ecdh>)> = Vec::with_capacity(count);
 
         for _ in 0..count {
-            output.push(self.key_generator.generate_ecdh_pubkey_and_id::<Ecdh, KId>(
-                &[],
-                expiration,
-                None,
-                &mut self.rng,
-            )?);
+            output.push(
+                self.key_generator
+                    .generate_ecdh_pubkey_and_id::<Ecdh, EcdhKId>(
+                        &[],
+                        expiration,
+                        None,
+                        &mut self.rng,
+                    )?,
+            );
         }
 
         Ok(output)
@@ -271,16 +301,19 @@ where
         // validate signing key ID. If we wanted to... we could associate the signing
         // key with a client. Not entirely sure how useful it would be, but it doesn't
         // cost anything to include the client's ID here during validation
-        self.ecdsa_key_id = self.key_generator.validate_ecdsa_key_id::<Ecdsa, KId>(
-            request.server_ecdsa_key_id.as_slice(),
-            Some(self.client_id.as_ref()),
-        )?;
+        self.ecdsa_key_id = self
+            .key_generator
+            .validate_ecdsa_key_id::<Ecdsa, EcdsaKId>(
+                request.server_ecdsa_key_id.as_slice(),
+                Some(self.client_id.as_ref()),
+            )?;
 
         let associated_data = request.client_id.as_bytes();
 
-        let ecdh_key_id = self
-            .key_generator
-            .validate_ecdh_key_id::<KId>(&decrypt_info.server_ecdh_key_id, Some(associated_data))?;
+        let ecdh_key_id = self.key_generator.validate_ecdh_key_id::<EcdhKId>(
+            &decrypt_info.server_ecdh_key_id,
+            Some(associated_data),
+        )?;
 
         let client_public_key =
             PublicKey::<Ecdh>::from_sec1_bytes(&decrypt_info.client_ecdh_pubkey)?;
@@ -385,12 +418,14 @@ where
 
         self.symmetric_key.zeroize();
 
-        let (key_id, pubkey) = self.key_generator.generate_ecdh_pubkey_and_id::<Ecdh, KId>(
-            &[],
-            None,
-            Some(self.client_id.as_ref()),
-            &mut self.rng,
-        )?;
+        let (key_id, pubkey) = self
+            .key_generator
+            .generate_ecdh_pubkey_and_id::<Ecdh, EcdhKId>(
+                &[],
+                None,
+                Some(self.client_id.as_ref()),
+                &mut self.rng,
+            )?;
 
         let next_key = EcdhKey {
             ecdh_key_id: key_id.as_ref().to_vec(),
@@ -410,16 +445,18 @@ where
         hasher.update(resp.encode_to_vec().as_slice());
         let hash = hasher.finalize();
 
-        let signer = self.key_generator.generate_ecdsa_key_from_id::<Ecdsa, KId>(
-            &self.ecdsa_key_id,
-            Some(self.client_id.as_ref()),
-        );
+        let signer = self
+            .key_generator
+            .generate_ecdsa_key_from_id::<Ecdsa, EcdsaKId>(
+                &self.ecdsa_key_id,
+                Some(self.client_id.as_ref()),
+            );
 
         let signature = signer.sign(&hash);
 
         // reset state to prepare for the next request, if there is one
         self.is_handshake = false;
-        self.ecdsa_key_id = KId::default();
+        self.ecdsa_key_id = EcdsaKId::default();
         self.client_id = CId::default();
         Ok((resp, hash, signature))
     }

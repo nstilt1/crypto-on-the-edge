@@ -4,6 +4,7 @@ use private_key_generator::{elliptic_curve::Error as EcError, error::IdCreationE
 use prost::DecodeError;
 
 /// An error arising from our protocol.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProtocolError {
     /// We were unable to decode the request from Protobuf encoding
     InvalidProtobufMessage(DecodeError),
@@ -16,7 +17,7 @@ pub enum ProtocolError {
     ClientIdNotSet,
     CanOnlyRegenerateIdDuringHandshake,
     InvalidRequest,
-    IdCreationError(IdCreationError)
+    IdCreationError(IdCreationError),
 }
 
 impl From<DecodeError> for ProtocolError {
@@ -31,12 +32,6 @@ impl From<InvalidId> for ProtocolError {
     }
 }
 
-impl From<IdCreationError> for ProtocolError {
-    fn from(value: IdCreationError) -> Self {
-        Self::IdCreationError(value)
-    }
-}
-
 impl From<EcError> for ProtocolError {
     fn from(_: EcError) -> Self {
         Self::InvalidPublicKey
@@ -46,6 +41,12 @@ impl From<EcError> for ProtocolError {
 impl From<AeadError> for ProtocolError {
     fn from(_: AeadError) -> Self {
         Self::AeadError
+    }
+}
+
+impl From<IdCreationError> for ProtocolError {
+    fn from(value: IdCreationError) -> Self {
+        Self::IdCreationError(value)
     }
 }
 
@@ -64,8 +65,8 @@ impl core::fmt::Display for ProtocolError {
             Self::InvalidProtobufMessage(v) => v.to_string(),
             Self::Base64DecodeError(v) => v.to_string(),
             Self::ClientIdNotSet => "You must successfully call 'decrypt_and_hash_request()' \
-                                     prior to calling this function".into(),
-            Self::IdCreationError(v) => v.to_string(),
+                                     prior to calling this function"
+                .into(),
             _ => "".to_string(),
         };
         f.write_str(&msg)
