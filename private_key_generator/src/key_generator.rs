@@ -5,7 +5,10 @@ use crate::{
     error::{IdCreationError, InvalidId},
     id::{timestamp_policies::use_timestamps, BITS_IN_USE},
     traits::{AllowedRngs, CryptoKeyGenerator},
-    utils::{extract_ints_from_slice, insert_ints_into_slice, u32_mask, u64_mask},
+    utils::{
+        extract_ints_from_slice, insert_ints_into_slice, months_to_seconds, u32_mask, u64_mask,
+        years_to_seconds,
+    },
 };
 use ecdsa::{
     elliptic_curve::{ops::Invert, CurveArithmetic, FieldBytes, FieldBytesSize, Scalar},
@@ -34,7 +37,11 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use core::marker::PhantomData;
 #[cfg(feature = "std")]
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    format,
+    string::String,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use crate::traits::EncodedId;
 use crate::typenum::Unsigned;
@@ -225,6 +232,49 @@ impl<
     };
 }
 
+impl<
+        const EPOCH: u64,
+        const VERSION_LIFETIME: u64,
+        const VERSION_BITS: u8,
+        const TIMESTAMP_BITS: u8,
+        const TIMESTAMP_PRECISION_LOSS: u8,
+        const MAX_EXPIRATION_TIME: u64,
+    >
+    VersioningConfig<
+        EPOCH,
+        VERSION_LIFETIME,
+        VERSION_BITS,
+        TIMESTAMP_BITS,
+        TIMESTAMP_PRECISION_LOSS,
+        MAX_EXPIRATION_TIME,
+    >
+{
+    /// Returns the minimum value for `TIMESTAMP_BITS + VERSION_BITS` to be able
+    /// to represent `VERSION_LIFETIME + MAX_KEY_EXPIRATION_TIME`
+    #[cfg(feature = "std")]
+    pub fn get_minimum_timestamp_params(&self) -> String {
+        let min = f64::log2(VERSION_LIFETIME as f64 + MAX_EXPIRATION_TIME as f64).ceil();
+        format!(
+            "TIMESTAMP_BITS + TIMESTAMP_PRECISION_LOSS must be at least {} to represent \
+             VERSION_LIFETIME + MAX_KEY_EXPIRATION_TIME",
+            min
+        )
+    }
+
+    /// Returns the minimum value for `VERSION_BITS` to be able to represent
+    /// `breaking_point_years`, excluding leap seconds.
+    #[cfg(feature = "std")]
+    pub fn get_minimum_version_bits_for_x_years(breaking_point_years: u64) -> String {
+        let desired_lifetime = years_to_seconds(breaking_point_years) as f64;
+
+        let min = f64::log2(desired_lifetime / VERSION_LIFETIME as f64).ceil();
+        format!(
+            "VERSION_BITS must be at least {} to represent {} years",
+            min, breaking_point_years
+        )
+    }
+}
+
 /// A simplified versioning configuration that allows for ID versions to change
 /// every 365.25 days (accounting for leap years), and with maximum timestamps
 /// of 365.25 days.
@@ -247,12 +297,12 @@ pub type AnnualVersionConfig<
     const TIMESTAMP_PRECISION_LOSS: u8,
     const TIMESTAMP_BITS: u8,
 > = VersioningConfig<
-    1_711_039_489, // epoch
-    31_557_600,    // version_lifetime
+    1_711_039_489,           // epoch, 2024
+    { years_to_seconds(1) }, // version_lifetime
     VERSION_BITS,
     TIMESTAMP_BITS,
     TIMESTAMP_PRECISION_LOSS,
-    31_557_600, // max_key_expiration_time
+    { years_to_seconds(1) }, // max_key_expiration_time
 >;
 
 /// A simplified versioning configuration where versions change every 30 days,
@@ -276,11 +326,11 @@ pub type MonthlyVersionConfig<
     const TIMESTAMP_BITS: u8,
 > = VersioningConfig<
     1_711_039_489,
-    { 60 * 60 * 24 * 30 },
+    { months_to_seconds(1) },
     VERSION_BITS,
     TIMESTAMP_BITS,
     TIMESTAMP_PRECISION_LOSS,
-    { 60 * 60 * 24 * 30 },
+    { months_to_seconds(1) },
 >;
 
 /// A simplified type where ID versions do not change.
