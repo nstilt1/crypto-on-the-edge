@@ -1,5 +1,6 @@
 use aead::Error as AeadError;
 use base64::DecodeError as B64DecodeError;
+use private_key_generator::ecdsa::signature::Error as SigningError;
 use private_key_generator::{elliptic_curve::Error as EcError, error::IdCreationError, InvalidId};
 use prost::DecodeError;
 
@@ -18,6 +19,8 @@ pub enum ProtocolError {
     CanOnlyRegenerateIdDuringHandshake,
     InvalidRequest,
     IdCreationError(IdCreationError),
+    /// This should only happen if the hash function size is incorrect
+    SigningError,
 }
 
 impl From<DecodeError> for ProtocolError {
@@ -56,6 +59,12 @@ impl From<B64DecodeError> for ProtocolError {
     }
 }
 
+impl From<SigningError> for ProtocolError {
+    fn from(_value: SigningError) -> Self {
+        Self::SigningError
+    }
+}
+
 impl core::fmt::Display for ProtocolError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         #[cfg(debug_assertions)]
@@ -67,8 +76,13 @@ impl core::fmt::Display for ProtocolError {
             Self::ClientIdNotSet => "You must successfully call 'decrypt_and_hash_request()' \
                                      prior to calling this function"
                 .into(),
+            Self::SigningError => "There was a signature error. Perhaps the digest size didn't \
+                                   match the signing key"
+                .into(),
             _ => "".to_string(),
         };
         f.write_str(&msg)
     }
 }
+
+impl std::error::Error for ProtocolError {}

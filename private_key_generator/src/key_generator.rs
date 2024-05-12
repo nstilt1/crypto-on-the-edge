@@ -28,13 +28,13 @@ use hkdf::{
 };
 use rand_core::RngCore;
 use subtle::{ConstantTimeEq, CtOption};
+
+#[cfg(feature = "zeroize")]
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use core::marker::PhantomData;
 #[cfg(feature = "std")]
 use std::time::{SystemTime, UNIX_EPOCH};
-
-use init_boxed::{cfg_new_boxed, CfgBoxed, Init};
 
 use crate::traits::EncodedId;
 use crate::typenum::Unsigned;
@@ -247,10 +247,10 @@ impl<
     // completing a cycle.
     const BREAKING_POINT_YEARS: u64 = {
         {
-            let calculated_breaking_point = VERSION_LIFETIME * (1 << VERSION_BITS as u64) + EPOCH;
-            let breaking_point_years =
-                calculated_breaking_point as f64 / 60f64 / 60f64 / 24f64 / 365.25;
-            match BREAKING_POINT_YEARS as f64 >= breaking_point_years {
+            let seconds_to_years = 1.0 / 60f64 / 60f64 / 24f64 / 365.25;
+            let calculated_breaking_point =
+                VERSION_LIFETIME as f64 * seconds_to_years * (1u64 << VERSION_BITS) as f64;
+            match BREAKING_POINT_YEARS as f64 >= calculated_breaking_point {
                 true => BREAKING_POINT_YEARS,
                 false => {
                     [ /* VersionConfig::VERSION_LIFETIME and VERSION_BITS were too small to fulfill reach BREAKING_POINT_YEARS without completing a cycle. */]
@@ -287,12 +287,12 @@ pub type AnnualVersionConfig<
     const TIMESTAMP_PRECISION_LOSS: u8,
     const TIMESTAMP_BITS: u8,
 > = VersioningConfig<
-    1_711_039_489,
-    31_557_600,
+    1_711_039_489, // epoch
+    31_557_600,    // version_lifetime
     VERSION_BITS,
     TIMESTAMP_BITS,
     TIMESTAMP_PRECISION_LOSS,
-    1_711_039_489,
+    31_557_600, // max_key_expiration_time
     BREAKING_POINT_YEARS,
 >;
 
@@ -415,21 +415,18 @@ where
     HkdfDigest: OutputSizeUser,
     I: HmacImpl<HkdfDigest>,
 {
-    top_level_hkdf: Hkdf<HkdfDigest, I>,
-    kdf_prk: Output<HkdfDigest>,
     /// The internal HKDF this uses, in case you want to access it
-    pub second_hkdf: Init<Hkdf<HkdfDigest, I>>,
-    mac_key: Key<M>,
-    mac: Init<M>,
+    pub hkdf: Hkdf<HkdfDigest, I>,
+    mac: M,
     current_version: u32,
     /// The salt for the current version used for the HKDF and MAC
     current_version_salt: Output<HkdfDigest>,
     current_version_epoch: u64,
     _versioning_config: PhantomData<V>,
-    rng_seed: Rng::Seed,
-    rng: Init<Rng>,
+    rng: Rng,
 }
 
+#[cfg(feature = "zeroize")]
 impl<M, V, R, HkdfDigest, I> Drop for KeyGenerator<M, V, R, HkdfDigest, I>
 where
     M: Mac + KeyInit + FixedOutputReset,
@@ -438,11 +435,13 @@ where
     HkdfDigest: OutputSizeUser,
     I: HmacImpl<HkdfDigest>,
 {
+    #[inline]
     fn drop(&mut self) {
         self.current_version_salt.zeroize();
     }
 }
 
+#[cfg(feature = "zeroize")]
 impl<M, V, R, HkdfDigest, I> ZeroizeOnDrop for KeyGenerator<M, V, R, HkdfDigest, I>
 where
     M: Mac + KeyInit + FixedOutputReset,
@@ -504,9 +503,7 @@ where
             let v = (diff / V::VERSION_LIFETIME) as u32;
             if self.current_version != v {
                 self.current_version = v;
-                self.rng
-                    .as_mut()
-                    .get_version_salt(v, &mut self.current_version_salt);
+                self.rng.get_version_salt(v, &mut self.current_version_salt);
                 self.current_version_epoch = Self::get_version_epoch(v)
             }
         }
@@ -522,8 +519,8 @@ where
         // version in an ID
         self.update_version();
         // compute a small "mac" of the ID where the version and timestamp only have 0s
-        Mac::update(self.mac.as_mut(), &id.as_ref()[..Id::MAC_START_INDEX]);
-        let metadata_mask = self.mac.as_mut().finalize_fixed_reset();
+        Mac::update(&mut self.mac, &id.as_ref()[..Id::MAC_START_INDEX]);
+        let metadata_mask = self.mac.finalize_fixed_reset();
 
         let mut version_mask_bytes = [0u8; 4];
         version_mask_bytes.copy_from_slice(&metadata_mask[..4]);
@@ -570,16 +567,16 @@ where
 
         let data = &[&id.as_ref()[..Id::MAC_START_INDEX], b"hmac", id_type, info];
         for d in data {
-            Mac::update(self.mac.as_mut(), d)
+            Mac::update(&mut self.mac, d)
         }
         if self.current_version != version {
             let mut salt: Output<HkdfDigest> = Default::default();
-            self.rng.as_mut().get_version_salt(version, &mut salt);
-            Mac::update(self.mac.as_mut(), &salt);
+            self.rng.get_version_salt(version, &mut salt);
+            Mac::update(&mut self.mac, &salt);
         } else {
-            Mac::update(self.mac.as_mut(), &self.current_version_salt);
+            Mac::update(&mut self.mac, &self.current_version_salt);
         }
-        self.mac.as_mut().finalize_fixed_reset()
+        self.mac.finalize_fixed_reset()
     }
 
     /// Validates the HMAC of an ID
@@ -634,92 +631,81 @@ where
         application_id: &[u8],
     ) -> (
         Array<u8, <Self::HkdfDigest as OutputSizeUser>::OutputSize>,
-        CfgBoxed<Self>,
+        Self,
     ) {
         let (prk, lvl_1_hkdf) = Hkdf::<HkdfDigest, I>::extract(Some(hkdf_key), application_id);
 
-        let mut result = cfg_new_boxed!(Self {
-            top_level_hkdf: lvl_1_hkdf,
-            kdf_prk: Default::default(),
-            second_hkdf: Init::<Hkdf<HkdfDigest, I>>::new(),
-            mac_key: Default::default(),
-            mac: Init::<M>::new(),
-            current_version: Default::default(),
-            current_version_salt: Default::default(),
-            current_version_epoch: Default::default(),
-            _versioning_config: PhantomData,
-            rng_seed: Default::default(),
-            rng: Init::<R>::new()
-        });
+        let mut kdf_prk: Output<HkdfDigest> = Default::default();
+        let mut mac_key: Key<M> = Default::default();
+        let mut rng_seed: R::Seed = Default::default();
 
-        result
-            .top_level_hkdf
-            .expand(b"lvl 2 kdf prk", result.kdf_prk.as_mut())
+        lvl_1_hkdf
+            .expand(b"lvl 2 kdf prk", kdf_prk.as_mut())
             .expect("kdf_prk should be small enough");
-        result
-            .top_level_hkdf
-            .expand(b"lvl 2 mac", result.mac_key.as_mut())
+        lvl_1_hkdf
+            .expand(b"lvl 2 mac", mac_key.as_mut())
             .expect("mac key should be small enough");
-        result
-            .top_level_hkdf
-            .expand(b"lvl 2 rng", &mut R::set_seed(&mut result.rng_seed))
+        lvl_1_hkdf
+            .expand(b"lvl 2 rng", &mut R::set_seed(&mut rng_seed))
             .expect("seed should be small enough");
 
-        *result.second_hkdf.as_mut_option() = Some(
-            Hkdf::<HkdfDigest, I>::from_prk(&result.kdf_prk)
-                .expect("This key should be long enough"),
-        );
-        *result.mac.as_mut_option() = Some(
-            M::new_from_slice(&result.mac_key).expect("This key should be the correct length"),
-        );
-        *result.rng.as_mut_option() = Some(R::init_rng(&mut result.rng_seed));
+        let hkdf =
+            Hkdf::<HkdfDigest, I>::from_prk(&kdf_prk).expect("This key should be long enough");
+        let mac = M::new_from_slice(&mac_key).expect("This key should be the correct length");
+        let mut rng = R::init_rng(&mut rng_seed);
 
         let current_version = Self::get_current_version();
         let mut salt: Output<HkdfDigest> = Default::default();
-        R::get_version_salt(result.rng.as_mut(), current_version, &mut salt);
-        result.current_version_epoch = Self::get_version_epoch(current_version);
-        (prk, result)
+        R::get_version_salt(&mut rng, current_version, &mut salt);
+        (
+            prk,
+            Self {
+                hkdf,
+                mac,
+                _versioning_config: PhantomData,
+                rng,
+                current_version,
+                current_version_epoch: Self::get_version_epoch(current_version),
+                current_version_salt: salt,
+            },
+        )
     }
 
     #[inline]
-    fn from_prk(prk: &[u8]) -> CfgBoxed<Self> {
-        let mut result = cfg_new_boxed!(Self {
-            top_level_hkdf: Hkdf::<HkdfDigest, I>::from_prk(prk)
-                .expect("The prk was not strong enough"),
-            kdf_prk: Default::default(),
-            second_hkdf: Init::<Hkdf<HkdfDigest, I>>::new(),
-            mac_key: Default::default(),
-            mac: Init::<M>::new(),
-            current_version: Default::default(),
-            current_version_salt: Default::default(),
-            current_version_epoch: Default::default(),
-            _versioning_config: PhantomData,
-            rng_seed: Default::default(),
-            rng: Init::<R>::new()
-        });
+    fn from_prk(prk: &[u8]) -> Self {
+        let lvl_1_hkdf =
+            Hkdf::<HkdfDigest, I>::from_prk(prk).expect("The prk was not strong enough");
 
-        result
-            .top_level_hkdf
-            .expand(b"lvl 2 kdf prk", &mut result.kdf_prk)
+        let mut kdf_prk: Output<HkdfDigest> = Default::default();
+        let mut mac_key: Key<M> = Default::default();
+        let mut rng_seed: R::Seed = Default::default();
+
+        lvl_1_hkdf
+            .expand(b"lvl 2 kdf prk", &mut kdf_prk)
             .expect("kdf prk should be small enough");
-        result
-            .top_level_hkdf
-            .expand(b"lvl 2 mac", result.mac_key.as_mut())
+        lvl_1_hkdf
+            .expand(b"lvl 2 mac", &mut mac_key)
             .expect("mac key should be small enough");
-        result
-            .top_level_hkdf
-            .expand(b"lvl 2 rng", &mut R::set_seed(&mut result.rng_seed))
+        lvl_1_hkdf
+            .expand(b"lvl 2 rng", &mut R::set_seed(&mut rng_seed))
             .expect("seed should be small enough");
 
-        *result.mac.as_mut_option() = Some(
-            M::new_from_slice(&result.mac_key).expect("This key should be the correct length"),
-        );
-        *result.rng.as_mut_option() = Some(R::init_rng(&mut result.rng_seed));
+        let mac = M::new_from_slice(&mac_key).expect("This key should be the correct length");
+        let mut rng = R::init_rng(&mut rng_seed);
 
         let current_version = Self::get_current_version();
         let mut salt: Output<HkdfDigest> = Default::default();
-        R::get_version_salt(result.rng.as_mut(), current_version, &mut salt);
-        result
+        R::get_version_salt(&mut rng, current_version, &mut salt);
+        Self {
+            hkdf: Hkdf::<HkdfDigest, I>::from_prk(&kdf_prk)
+                .expect("Your prk was not strong enough"),
+            mac,
+            _versioning_config: PhantomData,
+            rng,
+            current_version,
+            current_version_epoch: Self::get_version_epoch(current_version),
+            current_version_salt: salt,
+        }
     }
 
     #[inline]
@@ -744,8 +730,8 @@ where
                 BITS_IN_USE,
             );
 
-            Mac::update(self.mac.as_mut(), &zeroed_id[..Id::MAC_START_INDEX]);
-            let metadata_mask = self.mac.as_mut().finalize_fixed_reset();
+            Mac::update(&mut self.mac, &zeroed_id[..Id::MAC_START_INDEX]);
+            let metadata_mask = self.mac.finalize_fixed_reset();
 
             let mut version_mask_bytes = [0u8; 4];
             version_mask_bytes.copy_from_slice(&metadata_mask[..4]);
@@ -769,8 +755,8 @@ where
             BITS_IN_USE,
         );
 
-        Mac::update(self.mac.as_mut(), &zeroed_id[..Id::MAC_START_INDEX]);
-        let metadata_mask = self.mac.as_mut().finalize_fixed_reset();
+        Mac::update(&mut self.mac, &zeroed_id[..Id::MAC_START_INDEX]);
+        let metadata_mask = self.mac.finalize_fixed_reset();
 
         let mut version_mask_bytes = [0u8; 4];
         let mut timestamp_mask_bytes = [0u8; 8];
@@ -888,8 +874,7 @@ where
         let mut key_bytes = FieldBytes::<C>::default();
         let mut ctr: u8 = 0;
         let private_ecdsa_key: SigningKey<C> = loop {
-            self.second_hkdf
-                .as_ref()
+            self.hkdf
                 .expand_multi_info(
                     &[
                         b"ecdsa",
@@ -909,7 +894,10 @@ where
             }
             ctr += 1;
         };
+
+        #[cfg(feature = "zeroize")]
         key_bytes.zeroize();
+
         Ok((id, private_ecdsa_key))
     }
 
@@ -984,8 +972,7 @@ where
         let mut key_bytes = FieldBytes::<C>::default();
         let mut ctr: u8 = 0;
         let private_ecdsa_key: SigningKey<C> = loop {
-            self.second_hkdf
-                .as_ref()
+            self.hkdf
                 .expand_multi_info(
                     &[
                         b"ecdsa",
@@ -1006,7 +993,10 @@ where
             }
             ctr += 1;
         };
+
+        #[cfg(feature = "zeroize")]
         key_bytes.zeroize();
+
         private_ecdsa_key
     }
 
@@ -1043,8 +1033,7 @@ where
         let mut ctr: u8 = 0;
         let pubkey: PublicKey<C> = loop {
             let mut key_bytes: FieldBytes<C> = Default::default();
-            self.second_hkdf
-                .as_ref()
+            self.hkdf
                 .expand_multi_info(
                     &[
                         b"ecdh",
@@ -1062,7 +1051,10 @@ where
 
             if let Some(mut private_key) = NonZeroScalar::<C>::from_repr(key_bytes).into() {
                 let pubkey = PublicKey::<C>::from_secret_scalar(&private_key);
+
+                #[cfg(feature = "zeroize")]
                 private_key.zeroize();
+
                 break pubkey;
             }
             ctr += 1;
@@ -1141,8 +1133,7 @@ where
         let mut ctr: u8 = 0;
         let mut private_ecdh_key: NonZeroScalar<C> = loop {
             key_bytes = Default::default();
-            self.second_hkdf
-                .as_ref()
+            self.hkdf
                 .expand_multi_info(
                     &[
                         b"ecdh",
@@ -1165,7 +1156,10 @@ where
         };
 
         let shared_secret = diffie_hellman(private_ecdh_key, pubkey.as_affine());
+
+        #[cfg(feature = "zeroize")]
         private_ecdh_key.zeroize();
+
         shared_secret
     }
 
@@ -1176,10 +1170,28 @@ where
         client_id: &[u8],
         misc_info: &[u8],
         symmetric_key: &mut [u8],
+    ) -> [u8; 4] {
+        let version = self.current_version.to_le_bytes();
+        self.hkdf
+            .expand_multi_info(
+                &[resource_id, client_id, misc_info, &version],
+                symmetric_key,
+            )
+            .expect("Your symmetric key should not be very large.");
+        version
+    }
+
+    #[inline]
+    fn generate_resource_decryption_key(
+        &self,
+        resource_id: &[u8],
+        client_id: &[u8],
+        misc_info: &[u8],
+        version: &[u8; 4],
+        symmetric_key: &mut [u8],
     ) {
-        self.second_hkdf
-            .as_ref()
-            .expand_multi_info(&[resource_id, client_id, misc_info], symmetric_key)
+        self.hkdf
+            .expand_multi_info(&[resource_id, client_id, misc_info, version], symmetric_key)
             .expect("Your symmetric key should not be very large.")
     }
 }
@@ -1510,7 +1522,7 @@ mod tests {
         let key_generator = init_keygenerator!();
 
         let mut aes_key = [0u8; 32];
-        key_generator.generate_resource_encryption_key(b"test", &[], &[], &mut aes_key)
+        key_generator.generate_resource_encryption_key(b"test", &[], &[], &mut aes_key);
 
         //let (ecdh_key_id, ecdh_pubkey) =
         // key_generator.generate_ecdh_pubkey_and_id::<NistP256>(None, None);
