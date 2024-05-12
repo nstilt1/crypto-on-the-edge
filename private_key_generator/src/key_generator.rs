@@ -5,7 +5,10 @@ use crate::{
     error::{IdCreationError, InvalidId},
     id::{timestamp_policies::use_timestamps, BITS_IN_USE},
     traits::{AllowedRngs, CryptoKeyGenerator},
-    utils::{extract_ints_from_slice, insert_ints_into_slice, u32_mask, u64_mask},
+    utils::{
+        extract_ints_from_slice, insert_ints_into_slice, months_to_seconds, u32_mask, u64_mask,
+        years_to_seconds,
+    },
 };
 use ecdsa::{
     elliptic_curve::{ops::Invert, CurveArithmetic, FieldBytes, FieldBytesSize, Scalar},
@@ -20,7 +23,7 @@ use hkdf::{
     hmac::{
         digest::{
             array::{Array, ArraySize},
-            FixedOutputReset, Output, OutputSizeUser,
+            FixedOutputReset, Key, KeyInit, Output, OutputSizeUser,
         },
         Hmac, Mac, SimpleHmac,
     },
@@ -28,11 +31,17 @@ use hkdf::{
 };
 use rand_core::RngCore;
 use subtle::{ConstantTimeEq, CtOption};
-use zeroize::Zeroize;
+
+#[cfg(feature = "zeroize")]
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use core::marker::PhantomData;
 #[cfg(feature = "std")]
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    format,
+    string::String,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use crate::traits::EncodedId;
 use crate::typenum::Unsigned;
@@ -66,13 +75,6 @@ pub type SimpleKeyGenerator<M, V, Rng, H> = KeyGenerator<M, V, Rng, H, SimpleHma
 ///   use for a Key Id, which is only used if `REQUIRE_EXPIRING_KEYS` is true.
 ///   This is used to invalidate old versions of Key IDs that must have already
 ///   expired.
-/// - `BREAKING_POINT_YEARS` - This value is used to validate the potential
-///   lifetime of this program at compile time. A successful build indicates
-///   that the `version` of a `KeyGenerator` will not complete a cycle for
-///   `BREAKING_POINT_YEARS`. Completing a cycle would break the way that
-///   timestamps are decoded and could decrease the security of your
-///   application, but depending on how you configure this `VersioningConfig`,
-///   this code could go for over 2^32 years without cycling.
 pub struct VersioningConfig<
     const EPOCH: u64,
     const VERSION_LIFETIME: u64,
@@ -80,7 +82,6 @@ pub struct VersioningConfig<
     const TIMESTAMP_BITS: u8,
     const TIMESTAMP_PRECISION_LOSS: u8,
     const MAX_EXPIRATION_TIME: u64,
-    const BREAKING_POINT_YEARS: u64,
 >;
 
 /// A trait containing constants for versioning.
@@ -127,15 +128,6 @@ pub trait VersionConfig {
     /// maximum "time".
     const MAX_EXPIRATION_TIME: u64;
 
-    /// This value is used to validate the potential lifetime of this program at
-    /// compile time. A successful build indicates that the `version` of a
-    /// `KeyGenerator` will not complete a cycle for `BREAKING_POINT_YEARS`.
-    /// Completing a cycle would break the way that timestamps are decoded and
-    /// could decrease the security of your application, but depending on how
-    /// you configure this `VersionConfig`, this code could go for over 2^32
-    /// years without cycling.
-    const BREAKING_POINT_YEARS: u64;
-
     /// Gets the minimum accepted key id version. This only applies when
     /// `REQUIRE_EXPIRING_KEYS` is set to true.
     ///
@@ -163,7 +155,6 @@ impl<
         const TIMESTAMP_BITS: u8,
         const TIMESTAMP_PRECISION_LOSS: u8,
         const MAX_EXPIRATION_TIME: u64,
-        const BREAKING_POINT_YEARS: u64,
     > VersionConfig
     for VersioningConfig<
         EPOCH,
@@ -172,7 +163,6 @@ impl<
         TIMESTAMP_BITS,
         TIMESTAMP_PRECISION_LOSS,
         MAX_EXPIRATION_TIME,
-        BREAKING_POINT_YEARS,
     >
 {
     const EPOCH: u64 = EPOCH;
@@ -240,23 +230,49 @@ impl<
             }
         }
     };
+}
 
-    // validate that this program will reach `BREAKING_POINT_YEARS` without
-    // completing a cycle.
-    const BREAKING_POINT_YEARS: u64 = {
-        {
-            let calculated_breaking_point = VERSION_LIFETIME * (1 << VERSION_BITS as u64) + EPOCH;
-            let breaking_point_years =
-                calculated_breaking_point as f64 / 60f64 / 60f64 / 24f64 / 365.25;
-            match BREAKING_POINT_YEARS as f64 >= breaking_point_years {
-                true => BREAKING_POINT_YEARS,
-                false => {
-                    [ /* VersionConfig::VERSION_LIFETIME and VERSION_BITS were too small to fulfill reach BREAKING_POINT_YEARS without completing a cycle. */]
-                        [BREAKING_POINT_YEARS as usize]
-                }
-            }
-        }
-    };
+impl<
+        const EPOCH: u64,
+        const VERSION_LIFETIME: u64,
+        const VERSION_BITS: u8,
+        const TIMESTAMP_BITS: u8,
+        const TIMESTAMP_PRECISION_LOSS: u8,
+        const MAX_EXPIRATION_TIME: u64,
+    >
+    VersioningConfig<
+        EPOCH,
+        VERSION_LIFETIME,
+        VERSION_BITS,
+        TIMESTAMP_BITS,
+        TIMESTAMP_PRECISION_LOSS,
+        MAX_EXPIRATION_TIME,
+    >
+{
+    /// Returns the minimum value for `TIMESTAMP_BITS + VERSION_BITS` to be able
+    /// to represent `VERSION_LIFETIME + MAX_KEY_EXPIRATION_TIME`
+    #[cfg(feature = "std")]
+    pub fn get_minimum_timestamp_params(&self) -> String {
+        let min = f64::log2(VERSION_LIFETIME as f64 + MAX_EXPIRATION_TIME as f64).ceil();
+        format!(
+            "TIMESTAMP_BITS + TIMESTAMP_PRECISION_LOSS must be at least {} to represent \
+             VERSION_LIFETIME + MAX_KEY_EXPIRATION_TIME",
+            min
+        )
+    }
+
+    /// Returns the minimum value for `VERSION_BITS` to be able to represent
+    /// `breaking_point_years`, excluding leap seconds.
+    #[cfg(feature = "std")]
+    pub fn get_minimum_version_bits_for_x_years(breaking_point_years: u64) -> String {
+        let desired_lifetime = years_to_seconds(breaking_point_years) as f64;
+
+        let min = f64::log2(desired_lifetime / VERSION_LIFETIME as f64).ceil();
+        format!(
+            "VERSION_BITS must be at least {} to represent {} years",
+            min, breaking_point_years
+        )
+    }
 }
 
 /// A simplified versioning configuration that allows for ID versions to change
@@ -265,12 +281,9 @@ impl<
 ///
 /// # Type Arguments
 ///
-/// - `BREAKING_POINT_YEARS` - the amount of years that this program will be
-///   able to last without cycling through all of its versions. There will be a
-///   descriptive compilation error if it cannot last that long.
 /// - `VERSION_BITS` - Determines how many bits will be used to represent
-///   version numbers in IDs. This needs to be able to count up to
-///   `BREAKING_POINT_YEARS`.
+///   version numbers in IDs. **This needs to be able to represent `the amount
+///   of years` you expect this program to run**.
 /// - `TIMESTAMP_PRECISION_LOSS` - Specifies how many lower bits of the
 ///   timestamps are discarded. This bit shift reduces the timestamp's precision
 ///   but extends the maximum representable time.
@@ -280,31 +293,25 @@ impl<
 ///   worth of seconds).
 #[allow(unused)]
 pub type AnnualVersionConfig<
-    const BREAKING_POINT_YEARS: u64,
     const VERSION_BITS: u8,
     const TIMESTAMP_PRECISION_LOSS: u8,
     const TIMESTAMP_BITS: u8,
 > = VersioningConfig<
-    1_711_039_489,
-    31_557_600,
+    1_711_039_489,           // epoch, 2024
+    { years_to_seconds(1) }, // version_lifetime
     VERSION_BITS,
     TIMESTAMP_BITS,
     TIMESTAMP_PRECISION_LOSS,
-    1_711_039_489,
-    BREAKING_POINT_YEARS,
+    { years_to_seconds(1) }, // max_key_expiration_time
 >;
 
 /// A simplified versioning configuration where versions change every 30 days,
 /// and timestamps can be up to 30 days long.
 ///
 /// # Type Arguments
-///
-/// - `BREAKING_POINT_YEARS` - the amount of years that this program will be
-///   able to last without cycling through all of its versions. There will be a
-///   descriptive compilation error if it cannot last that long.
 /// - `VERSION_BITS` - Determines how many bits will be used to represent
-///   version numbers in IDs. This needs to be able to count up to
-///   `BREAKING_POINT_YEARS * 12`.
+///   version numbers in IDs. **This needs to be able to count up to `the amount
+///   of years you want this program to run * 12`**.
 /// - `TIMESTAMP_PRECISION_LOSS` - Specifies how many lower bits of the
 ///   timestamps are discarded. This bit shift reduces the timestamp's precision
 ///   but extends the maximum representable time.
@@ -314,18 +321,16 @@ pub type AnnualVersionConfig<
 ///   worth of seconds).
 #[allow(unused)]
 pub type MonthlyVersionConfig<
-    const BREAKING_POINT_YEARS: u64,
     const VERSION_BITS: u8,
     const TIMESTAMP_PRECISION_LOSS: u8,
     const TIMESTAMP_BITS: u8,
 > = VersioningConfig<
     1_711_039_489,
-    { 60 * 60 * 24 * 30 },
+    { months_to_seconds(1) },
     VERSION_BITS,
     TIMESTAMP_BITS,
     TIMESTAMP_PRECISION_LOSS,
-    { 60 * 60 * 24 * 30 },
-    BREAKING_POINT_YEARS,
+    { months_to_seconds(1) },
 >;
 
 /// A simplified type where ID versions do not change.
@@ -334,37 +339,29 @@ pub type MonthlyVersionConfig<
 /// such as in a no-std environment. It may also be useful if you just don't
 /// want to use versioning for IDs.
 ///
-/// If you intend to use timestamps in your IDs with this `StaticVersionConfig`,
-/// the timestamp must be able to represent the full range of
-/// `BREAKING_POINT_YEARS`.
+/// **If you intend to use timestamps in your IDs with this
+/// `StaticVersionConfig`, then the timestamp must be able to represent the full
+/// range of of time that you want your program to run for**.
 ///
 /// # Type Arguments
 ///
-/// - `BREAKING_POINT_YEARS` - the amount of years that this program will be
-///   able to run, based on how far the timestamp can represent into the future.
-///   If you aren't using timestamps, feel free to put `0` for everything here.
-/// - `TIMESTAMP_BITS` - the amount of bits in IDs reserved for timestamps. This
-///   needs to be able to represent up to `BREAKING_POINT_YEARS` worth of
-///   seconds. Just put `0` for this parameter if you aren't using timestamps.
+/// - `TIMESTAMP_BITS` - the amount of bits in IDs reserved for timestamps.
+///   **This (plus `TIMESTAMP_PRECION_LOSS`) needs to be able to represent up to
+///   the amount of years you expect this program to run for in seconds**. Just
+///   put `0` for this parameter if you aren't using timestamps.
 /// - `TIMESTAMP_PRECISION_LOSS` - Determines how many bits are discarded when
-///   storing timestamps. The timestamp parameters must satisfy this inequality:
-///   `2^(TIMESTAMP_BITS + TIMESTAMP_PRECISION_LOSS) ≥ BREAKING_POINT_YEARS *
-///   365.25 * 24 * 60 * 60`. Just put `0` for this parameter if you aren't
-///   using timestamps.
+///   storing timestamps. Just put `0` for this parameter if you aren't using
+///   timestamps.
 #[allow(unused)]
-pub type StaticVersionConfig<
-    const BREAKING_POINT_YEARS: u64,
-    const TIMESTAMP_BITS: u8,
-    const TIMESTAMP_PRECISION_LOSS: u8,
-> = VersioningConfig<
-    1_711_039_489,
-    { (0 as u64).wrapping_sub(1) },
-    0,
-    TIMESTAMP_BITS,
-    TIMESTAMP_PRECISION_LOSS,
-    { (0 as u64).wrapping_sub(1) },
-    BREAKING_POINT_YEARS,
->;
+pub type StaticVersionConfig<const TIMESTAMP_BITS: u8, const TIMESTAMP_PRECISION_LOSS: u8> =
+    VersioningConfig<
+        1_711_039_489,
+        { (0 as u64).wrapping_sub(1) },
+        0,
+        TIMESTAMP_BITS,
+        TIMESTAMP_PRECISION_LOSS,
+        { (0 as u64).wrapping_sub(1) },
+    >;
 
 /// A Private Key Generator based on an [HKDF](hkdf::Hkdf).
 ///
@@ -407,7 +404,7 @@ pub type StaticVersionConfig<
 /// ```
 pub struct KeyGenerator<M, V, Rng, HkdfDigest, I = Hmac<HkdfDigest>>
 where
-    M: Mac + FixedOutputReset,
+    M: Mac + KeyInit + FixedOutputReset,
     V: VersionConfig,
     Rng: AllowedRngs,
     HkdfDigest: OutputSizeUser,
@@ -424,9 +421,35 @@ where
     rng: Rng,
 }
 
+#[cfg(feature = "zeroize")]
+impl<M, V, R, HkdfDigest, I> Drop for KeyGenerator<M, V, R, HkdfDigest, I>
+where
+    M: Mac + KeyInit + FixedOutputReset,
+    V: VersionConfig,
+    R: AllowedRngs,
+    HkdfDigest: OutputSizeUser,
+    I: HmacImpl<HkdfDigest>,
+{
+    #[inline]
+    fn drop(&mut self) {
+        self.current_version_salt.zeroize();
+    }
+}
+
+#[cfg(feature = "zeroize")]
+impl<M, V, R, HkdfDigest, I> ZeroizeOnDrop for KeyGenerator<M, V, R, HkdfDigest, I>
+where
+    M: Mac + KeyInit + FixedOutputReset,
+    V: VersionConfig,
+    R: AllowedRngs,
+    HkdfDigest: OutputSizeUser,
+    I: HmacImpl<HkdfDigest>,
+{
+}
+
 impl<M, V, R, HkdfDigest, I> KeyGenerator<M, V, R, HkdfDigest, I>
 where
-    M: Mac + FixedOutputReset,
+    M: Mac + KeyInit + FixedOutputReset,
     V: VersionConfig,
     R: AllowedRngs,
     HkdfDigest: OutputSizeUser,
@@ -587,7 +610,7 @@ where
 
 impl<M, V, R, HkdfDigest, I> CryptoKeyGenerator for KeyGenerator<M, V, R, HkdfDigest, I>
 where
-    M: Mac + FixedOutputReset,
+    M: Mac + FixedOutputReset + KeyInit,
     V: VersionConfig,
     R: AllowedRngs,
     HkdfDigest: OutputSizeUser,
@@ -601,15 +624,32 @@ where
     fn extract(
         hkdf_key: &[u8],
         application_id: &[u8],
-        mac: M,
-        rng_seed: &mut R::Seed,
     ) -> (
         Array<u8, <Self::HkdfDigest as OutputSizeUser>::OutputSize>,
         Self,
     ) {
-        let (prk, hkdf) = Hkdf::<HkdfDigest, I>::extract(Some(hkdf_key), application_id);
+        let (prk, lvl_1_hkdf) = Hkdf::<HkdfDigest, I>::extract(Some(hkdf_key), application_id);
+
+        let mut kdf_prk: Output<HkdfDigest> = Default::default();
+        let mut mac_key: Key<M> = Default::default();
+        let mut rng_seed: R::Seed = Default::default();
+
+        lvl_1_hkdf
+            .expand(b"lvl 2 kdf prk", kdf_prk.as_mut())
+            .expect("kdf_prk should be small enough");
+        lvl_1_hkdf
+            .expand(b"lvl 2 mac", mac_key.as_mut())
+            .expect("mac key should be small enough");
+        lvl_1_hkdf
+            .expand(b"lvl 2 rng", &mut R::set_seed(&mut rng_seed))
+            .expect("seed should be small enough");
+
+        let hkdf =
+            Hkdf::<HkdfDigest, I>::from_prk(&kdf_prk).expect("This key should be long enough");
+        let mac = M::new_from_slice(&mac_key).expect("This key should be the correct length");
+        let mut rng = R::init_rng(&mut rng_seed);
+
         let current_version = Self::get_current_version();
-        let mut rng = R::init_rng(rng_seed);
         let mut salt: Output<HkdfDigest> = Default::default();
         R::get_version_salt(&mut rng, current_version, &mut salt);
         (
@@ -627,16 +667,36 @@ where
     }
 
     #[inline]
-    fn from_prk(prk: &[u8], mac: M, rng_seed: &mut R::Seed) -> Self {
+    fn from_prk(prk: &[u8]) -> Self {
+        let lvl_1_hkdf =
+            Hkdf::<HkdfDigest, I>::from_prk(prk).expect("The prk was not strong enough");
+
+        let mut kdf_prk: Output<HkdfDigest> = Default::default();
+        let mut mac_key: Key<M> = Default::default();
+        let mut rng_seed: R::Seed = Default::default();
+
+        lvl_1_hkdf
+            .expand(b"lvl 2 kdf prk", &mut kdf_prk)
+            .expect("kdf prk should be small enough");
+        lvl_1_hkdf
+            .expand(b"lvl 2 mac", &mut mac_key)
+            .expect("mac key should be small enough");
+        lvl_1_hkdf
+            .expand(b"lvl 2 rng", &mut R::set_seed(&mut rng_seed))
+            .expect("seed should be small enough");
+
+        let mac = M::new_from_slice(&mac_key).expect("This key should be the correct length");
+        let mut rng = R::init_rng(&mut rng_seed);
+
         let current_version = Self::get_current_version();
-        let mut rng = R::init_rng(rng_seed);
         let mut salt: Output<HkdfDigest> = Default::default();
         R::get_version_salt(&mut rng, current_version, &mut salt);
         Self {
-            hkdf: Hkdf::<HkdfDigest, I>::from_prk(prk).expect("Your prk was not strong enough"),
+            hkdf: Hkdf::<HkdfDigest, I>::from_prk(&kdf_prk)
+                .expect("Your prk was not strong enough"),
             mac,
             _versioning_config: PhantomData,
-            rng: R::init_rng(rng_seed),
+            rng,
             current_version,
             current_version_epoch: Self::get_version_epoch(current_version),
             current_version_salt: salt,
@@ -829,7 +889,10 @@ where
             }
             ctr += 1;
         };
+
+        #[cfg(feature = "zeroize")]
         key_bytes.zeroize();
+
         Ok((id, private_ecdsa_key))
     }
 
@@ -925,7 +988,10 @@ where
             }
             ctr += 1;
         };
+
+        #[cfg(feature = "zeroize")]
         key_bytes.zeroize();
+
         private_ecdsa_key
     }
 
@@ -978,9 +1044,13 @@ where
                      HKDF.",
                 );
 
+            #[allow(unused_mut)]
             if let Some(mut private_key) = NonZeroScalar::<C>::from_repr(key_bytes).into() {
                 let pubkey = PublicKey::<C>::from_secret_scalar(&private_key);
+
+                #[cfg(feature = "zeroize")]
                 private_key.zeroize();
+
                 break pubkey;
             }
             ctr += 1;
@@ -1057,6 +1127,7 @@ where
 
         let mut key_bytes: FieldBytes<C>;
         let mut ctr: u8 = 0;
+        #[allow(unused_mut)]
         let mut private_ecdh_key: NonZeroScalar<C> = loop {
             key_bytes = Default::default();
             self.hkdf
@@ -1082,7 +1153,10 @@ where
         };
 
         let shared_secret = diffie_hellman(private_ecdh_key, pubkey.as_affine());
+
+        #[cfg(feature = "zeroize")]
         private_ecdh_key.zeroize();
+
         shared_secret
     }
 
@@ -1093,9 +1167,28 @@ where
         client_id: &[u8],
         misc_info: &[u8],
         symmetric_key: &mut [u8],
+    ) -> [u8; 4] {
+        let version = self.current_version.to_le_bytes();
+        self.hkdf
+            .expand_multi_info(
+                &[resource_id, client_id, misc_info, &version],
+                symmetric_key,
+            )
+            .expect("Your symmetric key should not be very large.");
+        version
+    }
+
+    #[inline]
+    fn generate_resource_decryption_key(
+        &self,
+        resource_id: &[u8],
+        client_id: &[u8],
+        misc_info: &[u8],
+        version: &[u8; 4],
+        symmetric_key: &mut [u8],
     ) {
         self.hkdf
-            .expand_multi_info(&[resource_id, client_id, misc_info], symmetric_key)
+            .expand_multi_info(&[resource_id, client_id, misc_info, version], symmetric_key)
             .expect("Your symmetric key should not be very large.")
     }
 }
@@ -1108,7 +1201,7 @@ mod tests {
     use crate::typenum::consts::{U48, U5};
     use crate::BinaryId;
     use crate::{traits::CryptoKeyGenerator, KeyGenerator};
-    use hkdf::hmac::{Hmac, KeyInit};
+    use hkdf::hmac::Hmac;
     use rand::rngs::StdRng;
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
@@ -1119,7 +1212,7 @@ mod tests {
 
     const MAX_PREFIX_LEN: usize = 6;
 
-    type TestVersionConfig = AnnualVersionConfig<5, 4, 8, 24>;
+    type TestVersionConfig = AnnualVersionConfig<4, 8, 24>;
     type TestId = BinaryId<U48, U5, MAX_PREFIX_LEN, use_timestamps::Sometimes>;
     type KG<VersionConfiguration> =
         KeyGenerator<Hmac<Sha256>, VersionConfiguration, ChaCha8Rng, Sha256>;
@@ -1138,23 +1231,13 @@ mod tests {
 
     macro_rules! init_keygenerator {
         () => {
-            Sha2KeyGenerator::new(
-                &TEST_HMAC_KEY,
-                &[],
-                Hmac::<Sha256>::new_from_slice(&[4; 32]).unwrap(),
-                &mut [3u8; 32],
-            )
+            Sha2KeyGenerator::new(&TEST_HMAC_KEY, &[])
         };
     }
 
     macro_rules! init_keygenerator_with_versioning {
         ($v:ty) => {
-            KG::<$v>::new(
-                &TEST_HMAC_KEY,
-                &[],
-                Hmac::<Sha256>::new_from_slice(&[4; 32]).unwrap(),
-                &mut [3u8; 32],
-            )
+            KG::<$v>::new(&TEST_HMAC_KEY, &[])
         };
     }
 
@@ -1173,7 +1256,7 @@ mod tests {
             macro_rules! test_id_with_loss_factor {
                 ($($precision_reduction:literal), *) => {
                     $(
-                        let mut key_generator = init_keygenerator_with_versioning!(VersioningConfig<0, 1_000_000_000, 32, 32, $precision_reduction, 1_000_000_000, 800>);
+                        let mut key_generator = init_keygenerator_with_versioning!(VersioningConfig<0, 1_000_000_000, 32, 32, $precision_reduction, 1_000_000_000>);
 
                         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
                         for t in 0..(1 << $precision_reduction) {
@@ -1217,26 +1300,14 @@ mod tests {
             const EPOCH: u64 = 0;
             const VERSION_LIFETIME: u64 = 900_000;
             const MAX_EXPIRATION_TIME: u64 = 30_000;
-            type VersionConfig = VersioningConfig<
-                EPOCH,
-                VERSION_LIFETIME,
-                32,
-                24,
-                8,
-                MAX_EXPIRATION_TIME,
-                122_489_370,
-            >;
+            type VersionConfig =
+                VersioningConfig<EPOCH, VERSION_LIFETIME, 32, 24, 8, MAX_EXPIRATION_TIME>;
 
             type KeyGen = KeyGenerator<Hmac<Sha256>, VersionConfig, ChaCha8Rng, Sha256>;
 
             type VersionedTestId = BinaryId<U48, U5, 3, use_timestamps::Sometimes>;
 
-            let mut key_generator = KeyGen::new(
-                &[42u8; 32],
-                b"",
-                Hmac::<Sha256>::new_from_slice(&[3u8; 32]).unwrap(),
-                &mut [0u8; 32],
-            );
+            let mut key_generator = KeyGen::new(&[42u8; 32], b"");
             let id = key_generator
                 .generate_keyless_id::<VersionedTestId>(&[], &[], None, None, &mut OsRng)
                 .unwrap();
@@ -1266,19 +1337,17 @@ mod tests {
         };
 
         use super::{
-            CryptoKeyGenerator, Hmac, InvalidId, KeyInit, SeedableRng, Sha256, Sha2KeyGenerator,
-            StdRng, TestId, TEST_HMAC_KEY, TEST_ID_TYPE,
+            CryptoKeyGenerator, Hmac, InvalidId, SeedableRng, Sha256, Sha2KeyGenerator, StdRng,
+            TestId, TEST_HMAC_KEY, TEST_ID_TYPE,
         };
 
         #[test]
         fn zero_sized_version_and_timestamp() {
-            type StaticVersioning = StaticVersionConfig<0, 0, 0>;
+            type StaticVersioning = StaticVersionConfig<0, 0>;
             let mut key_generator =
                 KeyGenerator::<Hmac<Sha256>, StaticVersioning, ChaCha8Rng, Sha256>::new(
                     &[42u8; 32],
-                    &[43u8; 32],
-                    Hmac::<Sha256>::new_from_slice(&[44; 20]).unwrap(),
-                    &mut [32; 32],
+                    &[43; 32],
                 );
             type IdVersion0 = BinaryId<U48, U5, 3, use_timestamps::Never>;
 
@@ -1443,7 +1512,7 @@ mod tests {
         let key_generator = init_keygenerator!();
 
         let mut aes_key = [0u8; 32];
-        key_generator.generate_resource_encryption_key(b"test", &[], &[], &mut aes_key)
+        key_generator.generate_resource_encryption_key(b"test", &[], &[], &mut aes_key);
 
         //let (ecdh_key_id, ecdh_pubkey) =
         // key_generator.generate_ecdh_pubkey_and_id::<NistP256>(None, None);
@@ -1485,7 +1554,6 @@ mod tests {
                 TIMESTAMP_BITS, //TIMESTAMP_BITS
                 8,              // TIMESTAMP_PRECISION_LOSS
                 1_000_000_000,  // MAX_EXPIRATION_TIME
-                800,            // BREAKING_POINT_YEARS
             >;
 
         #[test]
@@ -1511,12 +1579,7 @@ mod tests {
                 .as_secs()
                 + 500000;
 
-            let mut k = K::new(
-                &[48u8; 32],
-                b"ff",
-                Hmac::<Sha256>::new_from_slice(&[42u8; 32]).unwrap(),
-                &mut [3u8; 32],
-            );
+            let mut k = K::new(&[48u8; 32], b"ff");
 
             let length_off_by_1 = k.generate_keyless_id::<TestId<U19, U1, 7>>(
                 &[],

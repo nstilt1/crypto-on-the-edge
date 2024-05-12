@@ -12,15 +12,13 @@ use elliptic_curve::{
     sec1::{FromEncodedPoint, ModulusSize, ToEncodedPoint},
     AffinePoint, CurveArithmetic, FieldBytesSize, JwkParameters, PublicKey, Scalar,
 };
-use hkdf::hmac::{
-    digest::{
-        array::{Array, ArraySize},
-        OutputSizeUser,
-    },
-    Mac,
+use hkdf::hmac::digest::{
+    array::{Array, ArraySize},
+    FixedOutputReset, KeyInit, Mac, OutputSizeUser,
 };
 use rand_chacha::{rand_core::SeedableRng, ChaCha12Rng, ChaCha20Rng, ChaCha8Rng};
 use subtle::CtOption;
+#[cfg(feature = "zeroize")]
 use zeroize::Zeroize;
 
 /// A trait for encoded IDs.
@@ -30,7 +28,7 @@ use zeroize::Zeroize;
 /// extra data, a bit to determine whether there is an expiration timestamp, an
 /// expiration timestamp if there is one, and a truncated MAC.
 pub trait EncodedId:
-    AsRef<[u8]> + AsMut<[u8]> + for<'a> TryFrom<&'a [u8], Error = InvalidId> + Default
+    AsRef<[u8]> + AsMut<[u8]> + Clone + for<'a> TryFrom<&'a [u8], Error = InvalidId> + Default
 {
     /// The metadata start index
     const METADATA_IDX: usize;
@@ -101,6 +99,12 @@ pub trait EncodedId:
     fn uses_associated_data(&self) -> bool;
 }
 
+#[cfg(feature = "zeroize")]
+pub trait SeedBounds: Default + Zeroize + AsMut<[u8]> {}
+#[cfg(not(feature = "zeroize"))]
+pub trait SeedBounds: Default + AsMut<[u8]> {}
+
+impl SeedBounds for [u8; 32] {}
 /// The methods for RNGs allowed for generating version nonces/salts.
 ///
 /// The primary requirement is that it is cryptographically secure, and that it
@@ -108,10 +112,14 @@ pub trait EncodedId:
 /// RNG for generating salts, and it is both seedable and capable of using a
 /// nonce, it could be added here.
 pub trait AllowedRngs {
-    type Seed: Zeroize;
+    type Seed: SeedBounds;
 
     /// Initializes an Rng and zeroizes the seed
     fn init_rng(seed: &mut Self::Seed) -> Self;
+
+    fn set_seed(seed: &mut Self::Seed) -> &mut [u8] {
+        seed.as_mut()
+    }
 
     /// Outputs the salt to be used for a specific version
     fn get_version_salt(&mut self, version: u32, output_salt: &mut [u8]);
@@ -124,6 +132,7 @@ macro_rules! allow_chacha_rng {
 
             fn init_rng(seed: &mut Self::Seed) -> Self {
                 let rng = $Rng::from_seed(*seed);
+                #[cfg(feature = "zeroize")]
                 seed.zeroize();
                 rng
             }
@@ -146,7 +155,7 @@ pub trait CryptoKeyGenerator: Sized {
     type HkdfDigest: OutputSizeUser;
 
     /// The MAC used for generating and validating IDs
-    type Mac: Mac;
+    type Mac: Mac + KeyInit + FixedOutputReset;
 
     /// The RNG used for generating version salts/nonces.
     type Rng: AllowedRngs;
@@ -155,13 +164,8 @@ pub trait CryptoKeyGenerator: Sized {
     /// discards the PRK value.
     ///
     /// See [Hkdf::new()](hkdf::Hkdf::new).
-    fn new(
-        hkdf_key: &[u8],
-        application_id: &[u8],
-        mac: Self::Mac,
-        rng_seed: &mut <Self::Rng as AllowedRngs>::Seed,
-    ) -> Self {
-        let (_, hkdf) = Self::extract(hkdf_key, application_id, mac, rng_seed);
+    fn new(hkdf_key: &[u8], application_id: &[u8]) -> Self {
+        let (_, hkdf) = Self::extract(hkdf_key, application_id);
         hkdf
     }
 
@@ -179,8 +183,6 @@ pub trait CryptoKeyGenerator: Sized {
     ///   the hash function's internal buffer[^note].
     /// * `application_id` - an arbitrary application-specific value which does
     ///   not need to be an actual identifier.
-    /// * `mac` - an instance of a MAC
-    /// * `rng_seed` - an RNG seed
     ///
     /// # Recommended key length bounds
     /// Here are the recommended minimum and maximum key length boundaries for
@@ -206,8 +208,6 @@ pub trait CryptoKeyGenerator: Sized {
     fn extract(
         hkdf_key: &[u8],
         application_id: &[u8],
-        mac: Self::Mac,
-        rng_seed: &mut <Self::Rng as AllowedRngs>::Seed,
     ) -> (
         Array<u8, <Self::HkdfDigest as OutputSizeUser>::OutputSize>,
         Self,
@@ -224,17 +224,11 @@ pub trait CryptoKeyGenerator: Sized {
     ///
     /// * `prk` - This value must be cryptographically strong, and the length
     ///   must be at least the output size of the hash function used.
-    /// * `mac` - an instance of a MAC
-    /// * `rng_seed` - the RNG seed
     ///
     /// # Panics
     /// This panics when the `prk`'s length is less than the output size of the
     /// hash function.
-    fn from_prk(
-        prk: &[u8],
-        mac: Self::Mac,
-        rng_seed: &mut <Self::Rng as AllowedRngs>::Seed,
-    ) -> Self;
+    fn from_prk(prk: &[u8]) -> Self;
 
     /// Decodes the version from the ID, as well as a timestamp if there is one.
     ///
@@ -474,6 +468,9 @@ pub trait CryptoKeyGenerator: Sized {
     /// Generates an encryption key for a resource, such as an item in a
     /// database table.
     ///
+    /// Returns the current version so that the encryption keys can be rotated.
+    /// It would be wise to store this by the nonce of the encrypted data.
+    ///
     /// # Arguments
     ///
     /// * `resource_id` - a resource identifier, such as a table name or table
@@ -492,6 +489,35 @@ pub trait CryptoKeyGenerator: Sized {
         resource_id: &[u8],
         client_id: &[u8],
         misc_info: &[u8],
+        symmetric_key: &mut [u8],
+    ) -> [u8; 4];
+
+    /// Generates an encryption key for a resource, such as an item in a
+    /// database table.
+    ///
+    /// Returns the current version so that the encryption keys can be rotated.
+    ///
+    /// # Arguments
+    ///
+    /// * `resource_id` - a resource identifier, such as a table name or table
+    ///   ID. Use an empty slice if you don't need to provide this.
+    /// * `client_id` - a client's ID. Use an empty slice if you don't need to
+    ///   provide this.
+    /// * `misc_info` - any other information that you want to derive the key
+    ///   with. Use an empty slice if you don't need to provide this.
+    /// * `version` - the version for the key. Ideally, the version should be
+    ///   stored near the nonce when first encrypting the data.
+    /// * `encryption_key` - a mutable slice for the key you want to use.
+    ///
+    /// # Panics
+    /// Panics if the `symmetric_key` size is larger than `255 * Hash Output
+    /// Size`.
+    fn generate_resource_decryption_key(
+        &self,
+        resource_id: &[u8],
+        client_id: &[u8],
+        misc_info: &[u8],
+        version: &[u8; 4],
         symmetric_key: &mut [u8],
     );
 }

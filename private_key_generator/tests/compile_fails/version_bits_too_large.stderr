@@ -1,22 +1,22 @@
-error[E0080]: evaluation of `<private_key_generator::VersioningConfig<0, 1000000000, 33, 56, 4, 1000000000, 800> as private_key_generator::VersionConfig>::VERSION_BITS` failed
+error[E0080]: evaluation of `<private_key_generator::VersioningConfig<0, 1000000000, 33, 56, 4, 1000000000> as private_key_generator::VersionConfig>::VERSION_BITS` failed
  --> src/key_generator.rs
   |
   |                     [/* VERSION_BITS must be less than or equal to 32 */][VERSION_BITS as usize]
   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ index out of bounds: the length is 0 but the index is 33
 
-note: erroneous constant used
+note: erroneous constant encountered
    --> src/id.rs
     |
     |                 &[V::VERSION_BITS, V::TIMESTAMP_BITS],
     |                   ^^^^^^^^^^^^^^^
 
-note: erroneous constant used
+note: erroneous constant encountered
    --> src/id.rs
     |
     |                 &[V::VERSION_BITS],
     |                   ^^^^^^^^^^^^^^^
 
-note: the above error was encountered while instantiating `fn <private_key_generator::BinaryId<private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UTerm, private_key_generator::prelude::B1>, private_key_generator::prelude::B1>, private_key_generator::prelude::B0>, private_key_generator::prelude::B0>, private_key_generator::prelude::B0>, private_key_generator::prelude::B0>, private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UTerm, private_key_generator::prelude::B1>, private_key_generator::prelude::B0>, private_key_generator::prelude::B1>, 5, private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UTerm, private_key_generator::prelude::B1>, private_key_generator::prelude::B1>, private_key_generator::prelude::B1>, private_key_generator::prelude::B0>, private_key_generator::prelude::B1>, private_key_generator::prelude::B0>> as private_key_generator::EncodedId>::generate::<private_key_generator::VersioningConfig<0, 1000000000, 33, 56, 4, 1000000000, 800>>`
+note: the above error was encountered while instantiating `fn <private_key_generator::BinaryId<private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UTerm, private_key_generator::prelude::B1>, private_key_generator::prelude::B1>, private_key_generator::prelude::B0>, private_key_generator::prelude::B0>, private_key_generator::prelude::B0>, private_key_generator::prelude::B0>, private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UTerm, private_key_generator::prelude::B1>, private_key_generator::prelude::B0>, private_key_generator::prelude::B1>, 5, private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UInt<private_key_generator::typenum::UTerm, private_key_generator::prelude::B1>, private_key_generator::prelude::B1>, private_key_generator::prelude::B1>, private_key_generator::prelude::B0>, private_key_generator::prelude::B1>, private_key_generator::prelude::B0>> as private_key_generator::EncodedId>::generate::<private_key_generator::VersioningConfig<0, 1000000000, 33, 56, 4, 1000000000>>`
    --> src/key_generator.rs
     |
     |           let (mut id, trimmed_timestamp) = Id::generate::<V>(
@@ -29,13 +29,13 @@ note: the above error was encountered while instantiating `fn <private_key_gener
     | |         )?;
     | |_________^
 
-note: erroneous constant used
+note: erroneous constant encountered
    --> src/key_generator.rs
     |
     |                 &[V::VERSION_BITS, V::TIMESTAMP_BITS],
     |                   ^^^^^^^^^^^^^^^
 
-note: erroneous constant used
+note: erroneous constant encountered
    --> src/key_generator.rs
     |
     |                 &[V::VERSION_BITS],

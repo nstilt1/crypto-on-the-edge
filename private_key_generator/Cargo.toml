@@ -24,10 +24,11 @@ doctest = false # need to change this before publishing
 ecdsa = { version = "0.17.0-pre.5", features = ["signing"]}
 elliptic-curve = { version = "0.14.0-pre.5", features = ["ecdh", "jwk"] }
 hkdf = "=0.13.0-pre.3"
+init_boxed = { path = "../init_boxed" }
 rand_chacha = { version = "0.3" }
 rand_core = "0.6"
 subtle = "2"
-zeroize = "1"
+zeroize = { version = "1", optional = true }
 
 [dev-dependencies]
 blake2 = "0.11.0-pre.3"
@@ -37,5 +38,7 @@ sha2 = "0.11.0-pre.3"
 trybuild = "1"
 
 [features]
+alloc = ["init_boxed/alloc"]
 default = ["std"]
 std = ["hkdf/std"] # std is required for checking timestamps against UNIX_EPOCH
+zeroize = ["dep:zeroize"]

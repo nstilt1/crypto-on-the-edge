@@ -1,9 +1,11 @@
 use aead::Error as AeadError;
 use base64::DecodeError as B64DecodeError;
+use private_key_generator::ecdsa::signature::Error as SigningError;
 use private_key_generator::{elliptic_curve::Error as EcError, error::IdCreationError, InvalidId};
 use prost::DecodeError;
 
 /// An error arising from our protocol.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProtocolError {
     /// We were unable to decode the request from Protobuf encoding
     InvalidProtobufMessage(DecodeError),
@@ -16,7 +18,9 @@ pub enum ProtocolError {
     ClientIdNotSet,
     CanOnlyRegenerateIdDuringHandshake,
     InvalidRequest,
-    IdCreationError(IdCreationError)
+    IdCreationError(IdCreationError),
+    /// This should only happen if the hash function size is incorrect
+    SigningError,
 }
 
 impl From<DecodeError> for ProtocolError {
@@ -28,12 +32,6 @@ impl From<DecodeError> for ProtocolError {
 impl From<InvalidId> for ProtocolError {
     fn from(value: InvalidId) -> Self {
         Self::InvalidId(value)
-    }
-}
-
-impl From<IdCreationError> for ProtocolError {
-    fn from(value: IdCreationError) -> Self {
-        Self::IdCreationError(value)
     }
 }
 
@@ -49,9 +47,21 @@ impl From<AeadError> for ProtocolError {
     }
 }
 
+impl From<IdCreationError> for ProtocolError {
+    fn from(value: IdCreationError) -> Self {
+        Self::IdCreationError(value)
+    }
+}
+
 impl From<B64DecodeError> for ProtocolError {
     fn from(value: B64DecodeError) -> Self {
         Self::Base64DecodeError(value)
+    }
+}
+
+impl From<SigningError> for ProtocolError {
+    fn from(_value: SigningError) -> Self {
+        Self::SigningError
     }
 }
 
@@ -64,10 +74,15 @@ impl core::fmt::Display for ProtocolError {
             Self::InvalidProtobufMessage(v) => v.to_string(),
             Self::Base64DecodeError(v) => v.to_string(),
             Self::ClientIdNotSet => "You must successfully call 'decrypt_and_hash_request()' \
-                                     prior to calling this function".into(),
-            Self::IdCreationError(v) => v.to_string(),
+                                     prior to calling this function"
+                .into(),
+            Self::SigningError => "There was a signature error. Perhaps the digest size didn't \
+                                   match the signing key"
+                .into(),
             _ => "".to_string(),
         };
         f.write_str(&msg)
     }
 }
+
+impl std::error::Error for ProtocolError {}

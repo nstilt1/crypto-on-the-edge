@@ -73,43 +73,29 @@ use timestamp_policies::use_timestamps;
 ///
 /// IDs will be of the type `Array<u8, IdLength>`, and will have this format:
 ///
-/// `[Prefix][Metadata][RandomBytes][MAC]`
+/// `[Prefix][Metadata][PsuedorandomBytes][MAC]`
 ///
 /// # Type Parameters
 ///
-/// - `IdLength`: The total length of the ID in bytes.
-/// - `MacLength`: The length of the MAC token at the end of the ID in bytes.
-/// - `MAX_PREFIX_LEN`: The maximum length of any prefix before the ID data.
+/// - `IdLength` - The total length of the ID in bytes.
+/// - `MacLength` - The length of the MAC token at the end of the ID in bytes.
+/// - `MAX_PREFIX_LEN` - The maximum length of any prefix before the ID data.
 ///   This length is in bytes.
-/// - `VERSION_BITS`: The number of bits used to represent the version of the
-///   ID. This value must be less than 32 to fit within the constraints. The
-///   version is stored in Little Endian order. If you don't want to use
-///   versions for the ID, set this to zero.
-///
-/// # Remarks
-/// The `BinaryId` struct allows for detailed control over the encoding of
-/// version and timestamp information within a binary ID format, offering a
-/// balance between precision and space efficiency. The
-/// `TIMESTAMP_PRECISION_REDUCTION` parameter, in particular, provides a
-/// mechanism to adjust the granularity of timestamp encoding to suit different
-/// time range and precision requirements.
+/// - `TimestampPolicy` - The timestamp policy for this ID. This will determine
+///   whether the ID will always use timestamps, sometimes use timestamps, or
+///   never use timestamps, which enables us to be more or less restrictive when
+///   validating IDs.
 ///
 /// # Examples
 /// ```rust
-/// use private_key_generator::{
-///     typenum::consts::{U32, U4},
-///     BinaryId,
-/// };
+/// use private_key_generator::prelude::*;
 ///
 /// // creating a type alias for an ID
 /// type ClientId = BinaryId<
-///     U32,        // IdLength
-///     U4,         // MacLength
-///     6,          // MAX_PREFIX_LEN
-///     3,          // VERSION_BITS
-///     24,         // TIMESTAMP_BITS
-///     8,          // TIMESTAMP_PRECISION_REDUCTION
-///     1709349508, // EPOCH
+///     U32,                       // IdLength
+///     U4,                        // MacLength
+///     6,                         // MAX_PREFIX_LEN
+///     use_timestamps::Sometimes, // Timestamp policy
 /// >;
 /// ```
 #[derive(Debug, Clone)]
@@ -417,7 +403,7 @@ mod tests {
     #[test]
     fn uses_associated_data() {
         use super::EncodedId;
-        type TestVersionConfig = VersioningConfig<0, 1_000_000_000, 24, 24, 8, 1_000_000_000, 800>;
+        type TestVersionConfig = VersioningConfig<0, 1_000_000_000, 24, 24, 8, 1_000_000_000>;
         type IdVersion1 = BinaryId<U48, U5, PREFIX_LEN, use_timestamps::Sometimes>;
 
         let (id_with_associated_data, _) =

@@ -1,5 +1,5 @@
 use private_key_generator::prelude::*;
-use hkdf::hmac::{Hmac, KeyInit};
+use hkdf::hmac::Hmac;
 use rand_chacha::ChaCha8Rng;
 use sha2::Sha256;
 
@@ -17,12 +17,11 @@ type InvalidVersionLifetimeConfig = VersioningConfig<
     56,             // TIMESTAMP_BITS
     5,              // TIMESTAMP_PRECISION_LOSS is too high because TIMESTAMP_BITS + TIMESTAMP_PRECISION_LOSS is above 64
     1_000_000_000,  // MAX_KEY_EXPIRATION_TIME
-    800             // BREAKING_POINT_YEARS
 >;
 
 fn main() {
     // this test should not compile because the VERSION_LIFETIME is too short. When the VERSION_LIFETIME is too short, the KeyGenerator will run through the total amount of versions way too quickly. Thus, it is limited to 2 weeks.
     type K = KeyGenerator<Hmac<Sha256>, InvalidVersionLifetimeConfig, ChaCha8Rng, Sha256>;
 
-    let mut _k = K::new(&[48u8; 32], b"ff", Hmac::<Sha256>::new_from_slice(&[42u8; 32]).unwrap(), &mut [3u8; 32]);
+    let mut _k = K::new(&[48u8; 32], b"ff");
 }

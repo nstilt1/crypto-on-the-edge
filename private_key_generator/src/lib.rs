@@ -115,6 +115,8 @@ pub use hkdf::hmac::digest::Digest;
 
 pub use elliptic_curve;
 pub use hkdf;
+#[cfg(feature = "zeroize")]
+pub use zeroize::{Zeroize, ZeroizeOnDrop};
 
 mod id;
 mod key_generator;
