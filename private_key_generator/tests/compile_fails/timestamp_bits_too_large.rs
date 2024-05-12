@@ -19,7 +19,6 @@ type InvalidTimestampBitsConfig = VersioningConfig<
     57,             // TIMESTAMP_BITS
     0,              // TIMESTAMP_PRECISION_LOSS
     1_000_000_000,  // MAX_KEY_EXPIRATION_TIME
-    800             // BREAKING_POINT_YEARS
 >;
 
 fn main() {

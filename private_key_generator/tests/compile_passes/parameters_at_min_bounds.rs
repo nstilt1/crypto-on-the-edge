@@ -22,7 +22,7 @@ type TestId = BinaryId<
 // >;
 
 fn main() {
-    type V  = StaticVersionConfig<0, 0, 0>;
+    type V  = StaticVersionConfig<0, 0>;
     type K = KeyGenerator<Hmac<Sha256>, V, ChaCha8Rng, Sha256>;
 
     let mut k = K::new(&[48u8; 32], b"ff");

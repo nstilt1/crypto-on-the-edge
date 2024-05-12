@@ -22,6 +22,29 @@ impl BoolMath for u32 {
     }
 }
 
+/// Calculates the number of seconds in `num_years` at compile time.
+///
+/// Does not take into account leap seconds.
+#[inline]
+#[allow(unused)]
+pub const fn years_to_seconds(num_years: u64) -> u64 {
+    num_years * days_to_seconds(365)
+}
+/// Calculates the number of seconds in `num_months` at compile time.
+///
+/// A month is counted as 30 days.
+#[inline]
+#[allow(unused)]
+pub const fn months_to_seconds(num_months: u64) -> u64 {
+    days_to_seconds(30 * num_months)
+}
+/// Calculates the number of seconds in `num_days` at compile time.
+#[inline]
+#[allow(unused)]
+pub const fn days_to_seconds(num_days: u64) -> u64 {
+    num_days * 24 * 60 * 60
+}
+
 /// implements a const mask function for some unsigned integers
 macro_rules! impl_mask {
     ($name:ident, $type:ty, $bits:literal) => {

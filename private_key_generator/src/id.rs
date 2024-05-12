@@ -403,7 +403,7 @@ mod tests {
     #[test]
     fn uses_associated_data() {
         use super::EncodedId;
-        type TestVersionConfig = VersioningConfig<0, 1_000_000_000, 24, 24, 8, 1_000_000_000, 800>;
+        type TestVersionConfig = VersioningConfig<0, 1_000_000_000, 24, 24, 8, 1_000_000_000>;
         type IdVersion1 = BinaryId<U48, U5, PREFIX_LEN, use_timestamps::Sometimes>;
 
         let (id_with_associated_data, _) =

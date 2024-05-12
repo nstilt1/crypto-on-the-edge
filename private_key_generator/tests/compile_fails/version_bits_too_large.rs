@@ -18,7 +18,6 @@ type InvalidVersionBitsConfig = VersioningConfig<
     56,             // TIMESTAMP_BITS
     4,              // TIMESTAMP_PRECISION_LOSS is too high because TIMESTAMP_BITS + TIMESTAMP_PRECISION_LOSS is above 64
     1_000_000_000,  // MAX_KEY_EXPIRATION_TIME
-    800             // BREAKING_POINT_YEARS
 >;
 
 fn main() {

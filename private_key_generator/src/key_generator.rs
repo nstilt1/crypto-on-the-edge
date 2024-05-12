@@ -68,13 +68,6 @@ pub type SimpleKeyGenerator<M, V, Rng, H> = KeyGenerator<M, V, Rng, H, SimpleHma
 ///   use for a Key Id, which is only used if `REQUIRE_EXPIRING_KEYS` is true.
 ///   This is used to invalidate old versions of Key IDs that must have already
 ///   expired.
-/// - `BREAKING_POINT_YEARS` - This value is used to validate the potential
-///   lifetime of this program at compile time. A successful build indicates
-///   that the `version` of a `KeyGenerator` will not complete a cycle for
-///   `BREAKING_POINT_YEARS`. Completing a cycle would break the way that
-///   timestamps are decoded and could decrease the security of your
-///   application, but depending on how you configure this `VersioningConfig`,
-///   this code could go for over 2^32 years without cycling.
 pub struct VersioningConfig<
     const EPOCH: u64,
     const VERSION_LIFETIME: u64,
@@ -82,7 +75,6 @@ pub struct VersioningConfig<
     const TIMESTAMP_BITS: u8,
     const TIMESTAMP_PRECISION_LOSS: u8,
     const MAX_EXPIRATION_TIME: u64,
-    const BREAKING_POINT_YEARS: u64,
 >;
 
 /// A trait containing constants for versioning.
@@ -129,15 +121,6 @@ pub trait VersionConfig {
     /// maximum "time".
     const MAX_EXPIRATION_TIME: u64;
 
-    /// This value is used to validate the potential lifetime of this program at
-    /// compile time. A successful build indicates that the `version` of a
-    /// `KeyGenerator` will not complete a cycle for `BREAKING_POINT_YEARS`.
-    /// Completing a cycle would break the way that timestamps are decoded and
-    /// could decrease the security of your application, but depending on how
-    /// you configure this `VersionConfig`, this code could go for over 2^32
-    /// years without cycling.
-    const BREAKING_POINT_YEARS: u64;
-
     /// Gets the minimum accepted key id version. This only applies when
     /// `REQUIRE_EXPIRING_KEYS` is set to true.
     ///
@@ -165,7 +148,6 @@ impl<
         const TIMESTAMP_BITS: u8,
         const TIMESTAMP_PRECISION_LOSS: u8,
         const MAX_EXPIRATION_TIME: u64,
-        const BREAKING_POINT_YEARS: u64,
     > VersionConfig
     for VersioningConfig<
         EPOCH,
@@ -174,7 +156,6 @@ impl<
         TIMESTAMP_BITS,
         TIMESTAMP_PRECISION_LOSS,
         MAX_EXPIRATION_TIME,
-        BREAKING_POINT_YEARS,
     >
 {
     const EPOCH: u64 = EPOCH;
@@ -242,23 +223,6 @@ impl<
             }
         }
     };
-
-    // validate that this program will reach `BREAKING_POINT_YEARS` without
-    // completing a cycle.
-    const BREAKING_POINT_YEARS: u64 = {
-        {
-            let seconds_to_years = 1.0 / 60f64 / 60f64 / 24f64 / 365.25;
-            let calculated_breaking_point =
-                VERSION_LIFETIME as f64 * seconds_to_years * (1u64 << VERSION_BITS) as f64;
-            match BREAKING_POINT_YEARS as f64 >= calculated_breaking_point {
-                true => BREAKING_POINT_YEARS,
-                false => {
-                    [ /* VersionConfig::VERSION_LIFETIME and VERSION_BITS were too small to fulfill reach BREAKING_POINT_YEARS without completing a cycle. */]
-                        [BREAKING_POINT_YEARS as usize]
-                }
-            }
-        }
-    };
 }
 
 /// A simplified versioning configuration that allows for ID versions to change
@@ -267,12 +231,9 @@ impl<
 ///
 /// # Type Arguments
 ///
-/// - `BREAKING_POINT_YEARS` - the amount of years that this program will be
-///   able to last without cycling through all of its versions. There will be a
-///   descriptive compilation error if it cannot last that long.
 /// - `VERSION_BITS` - Determines how many bits will be used to represent
-///   version numbers in IDs. This needs to be able to count up to
-///   `BREAKING_POINT_YEARS`.
+///   version numbers in IDs. **This needs to be able to represent `the amount
+///   of years` you expect this program to run**.
 /// - `TIMESTAMP_PRECISION_LOSS` - Specifies how many lower bits of the
 ///   timestamps are discarded. This bit shift reduces the timestamp's precision
 ///   but extends the maximum representable time.
@@ -282,7 +243,6 @@ impl<
 ///   worth of seconds).
 #[allow(unused)]
 pub type AnnualVersionConfig<
-    const BREAKING_POINT_YEARS: u64,
     const VERSION_BITS: u8,
     const TIMESTAMP_PRECISION_LOSS: u8,
     const TIMESTAMP_BITS: u8,
@@ -293,20 +253,15 @@ pub type AnnualVersionConfig<
     TIMESTAMP_BITS,
     TIMESTAMP_PRECISION_LOSS,
     31_557_600, // max_key_expiration_time
-    BREAKING_POINT_YEARS,
 >;
 
 /// A simplified versioning configuration where versions change every 30 days,
 /// and timestamps can be up to 30 days long.
 ///
 /// # Type Arguments
-///
-/// - `BREAKING_POINT_YEARS` - the amount of years that this program will be
-///   able to last without cycling through all of its versions. There will be a
-///   descriptive compilation error if it cannot last that long.
 /// - `VERSION_BITS` - Determines how many bits will be used to represent
-///   version numbers in IDs. This needs to be able to count up to
-///   `BREAKING_POINT_YEARS * 12`.
+///   version numbers in IDs. **This needs to be able to count up to `the amount
+///   of years you want this program to run * 12`**.
 /// - `TIMESTAMP_PRECISION_LOSS` - Specifies how many lower bits of the
 ///   timestamps are discarded. This bit shift reduces the timestamp's precision
 ///   but extends the maximum representable time.
@@ -316,7 +271,6 @@ pub type AnnualVersionConfig<
 ///   worth of seconds).
 #[allow(unused)]
 pub type MonthlyVersionConfig<
-    const BREAKING_POINT_YEARS: u64,
     const VERSION_BITS: u8,
     const TIMESTAMP_PRECISION_LOSS: u8,
     const TIMESTAMP_BITS: u8,
@@ -327,7 +281,6 @@ pub type MonthlyVersionConfig<
     TIMESTAMP_BITS,
     TIMESTAMP_PRECISION_LOSS,
     { 60 * 60 * 24 * 30 },
-    BREAKING_POINT_YEARS,
 >;
 
 /// A simplified type where ID versions do not change.
@@ -336,37 +289,29 @@ pub type MonthlyVersionConfig<
 /// such as in a no-std environment. It may also be useful if you just don't
 /// want to use versioning for IDs.
 ///
-/// If you intend to use timestamps in your IDs with this `StaticVersionConfig`,
-/// the timestamp must be able to represent the full range of
-/// `BREAKING_POINT_YEARS`.
+/// **If you intend to use timestamps in your IDs with this
+/// `StaticVersionConfig`, then the timestamp must be able to represent the full
+/// range of of time that you want your program to run for**.
 ///
 /// # Type Arguments
 ///
-/// - `BREAKING_POINT_YEARS` - the amount of years that this program will be
-///   able to run, based on how far the timestamp can represent into the future.
-///   If you aren't using timestamps, feel free to put `0` for everything here.
-/// - `TIMESTAMP_BITS` - the amount of bits in IDs reserved for timestamps. This
-///   needs to be able to represent up to `BREAKING_POINT_YEARS` worth of
-///   seconds. Just put `0` for this parameter if you aren't using timestamps.
+/// - `TIMESTAMP_BITS` - the amount of bits in IDs reserved for timestamps.
+///   **This (plus `TIMESTAMP_PRECION_LOSS`) needs to be able to represent up to
+///   the amount of years you expect this program to run for in seconds**. Just
+///   put `0` for this parameter if you aren't using timestamps.
 /// - `TIMESTAMP_PRECISION_LOSS` - Determines how many bits are discarded when
-///   storing timestamps. The timestamp parameters must satisfy this inequality:
-///   `2^(TIMESTAMP_BITS + TIMESTAMP_PRECISION_LOSS) ≥ BREAKING_POINT_YEARS *
-///   365.25 * 24 * 60 * 60`. Just put `0` for this parameter if you aren't
-///   using timestamps.
+///   storing timestamps. Just put `0` for this parameter if you aren't using
+///   timestamps.
 #[allow(unused)]
-pub type StaticVersionConfig<
-    const BREAKING_POINT_YEARS: u64,
-    const TIMESTAMP_BITS: u8,
-    const TIMESTAMP_PRECISION_LOSS: u8,
-> = VersioningConfig<
-    1_711_039_489,
-    { (0 as u64).wrapping_sub(1) },
-    0,
-    TIMESTAMP_BITS,
-    TIMESTAMP_PRECISION_LOSS,
-    { (0 as u64).wrapping_sub(1) },
-    BREAKING_POINT_YEARS,
->;
+pub type StaticVersionConfig<const TIMESTAMP_BITS: u8, const TIMESTAMP_PRECISION_LOSS: u8> =
+    VersioningConfig<
+        1_711_039_489,
+        { (0 as u64).wrapping_sub(1) },
+        0,
+        TIMESTAMP_BITS,
+        TIMESTAMP_PRECISION_LOSS,
+        { (0 as u64).wrapping_sub(1) },
+    >;
 
 /// A Private Key Generator based on an [HKDF](hkdf::Hkdf).
 ///
@@ -1049,6 +994,7 @@ where
                      HKDF.",
                 );
 
+            #[allow(unused_mut)]
             if let Some(mut private_key) = NonZeroScalar::<C>::from_repr(key_bytes).into() {
                 let pubkey = PublicKey::<C>::from_secret_scalar(&private_key);
 
@@ -1131,6 +1077,7 @@ where
 
         let mut key_bytes: FieldBytes<C>;
         let mut ctr: u8 = 0;
+        #[allow(unused_mut)]
         let mut private_ecdh_key: NonZeroScalar<C> = loop {
             key_bytes = Default::default();
             self.hkdf
@@ -1215,7 +1162,7 @@ mod tests {
 
     const MAX_PREFIX_LEN: usize = 6;
 
-    type TestVersionConfig = AnnualVersionConfig<5, 4, 8, 24>;
+    type TestVersionConfig = AnnualVersionConfig<4, 8, 24>;
     type TestId = BinaryId<U48, U5, MAX_PREFIX_LEN, use_timestamps::Sometimes>;
     type KG<VersionConfiguration> =
         KeyGenerator<Hmac<Sha256>, VersionConfiguration, ChaCha8Rng, Sha256>;
@@ -1259,7 +1206,7 @@ mod tests {
             macro_rules! test_id_with_loss_factor {
                 ($($precision_reduction:literal), *) => {
                     $(
-                        let mut key_generator = init_keygenerator_with_versioning!(VersioningConfig<0, 1_000_000_000, 32, 32, $precision_reduction, 1_000_000_000, 800>);
+                        let mut key_generator = init_keygenerator_with_versioning!(VersioningConfig<0, 1_000_000_000, 32, 32, $precision_reduction, 1_000_000_000>);
 
                         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
                         for t in 0..(1 << $precision_reduction) {
@@ -1303,15 +1250,8 @@ mod tests {
             const EPOCH: u64 = 0;
             const VERSION_LIFETIME: u64 = 900_000;
             const MAX_EXPIRATION_TIME: u64 = 30_000;
-            type VersionConfig = VersioningConfig<
-                EPOCH,
-                VERSION_LIFETIME,
-                32,
-                24,
-                8,
-                MAX_EXPIRATION_TIME,
-                122_489_370,
-            >;
+            type VersionConfig =
+                VersioningConfig<EPOCH, VERSION_LIFETIME, 32, 24, 8, MAX_EXPIRATION_TIME>;
 
             type KeyGen = KeyGenerator<Hmac<Sha256>, VersionConfig, ChaCha8Rng, Sha256>;
 
@@ -1353,7 +1293,7 @@ mod tests {
 
         #[test]
         fn zero_sized_version_and_timestamp() {
-            type StaticVersioning = StaticVersionConfig<0, 0, 0>;
+            type StaticVersioning = StaticVersionConfig<0, 0>;
             let mut key_generator =
                 KeyGenerator::<Hmac<Sha256>, StaticVersioning, ChaCha8Rng, Sha256>::new(
                     &[42u8; 32],
@@ -1564,7 +1504,6 @@ mod tests {
                 TIMESTAMP_BITS, //TIMESTAMP_BITS
                 8,              // TIMESTAMP_PRECISION_LOSS
                 1_000_000_000,  // MAX_EXPIRATION_TIME
-                800,            // BREAKING_POINT_YEARS
             >;
 
         #[test]
