@@ -16,7 +16,7 @@ use private_key_generator::{
         AffinePoint, CurveArithmetic, FieldBytesSize, JwkParameters, PublicKey, Scalar,
     },
     error::IdCreationError,
-    hkdf::hmac::digest::{core_api::BlockSizeUser, Output as HashOutput},
+    hkdf::hmac::digest::core_api::BlockSizeUser,
     typenum::Unsigned,
     CryptoKeyGenerator, Digest, EncodedId,
 };
@@ -41,6 +41,7 @@ pub mod utils;
 use utils::{b64_len_to_binary_len, padding_trail, StringSanitization};
 
 mod error;
+mod macros;
 pub mod prelude;
 mod request;
 mod response;
@@ -538,7 +539,9 @@ where
         // was originally encoded in base64, it wouldn't be much larger than 133% of the
         // length
         if request.client_id.len() > CId::IdLen::USIZE << 1 {
-            return Err(ProtocolError::InvalidRequest);
+            return Err(ProtocolError::InvalidRequest(
+                "Client ID is too long.".into(),
+            ));
         }
 
         let decrypt_info = request
@@ -667,6 +670,7 @@ where
 
         let key = aead::Key::<Aead_>::from_slice(&self.symmetric_key);
 
+        #[allow(unused_mut)]
         let mut plaintext = response.encode_to_vec();
 
         // the server will be skipping a random nonce generation in favor of simply

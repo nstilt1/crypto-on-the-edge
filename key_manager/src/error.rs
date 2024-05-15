@@ -17,7 +17,7 @@ pub enum ProtocolError {
     Base64DecodeError(B64DecodeError),
     ClientIdNotSet,
     CanOnlyRegenerateIdDuringHandshake,
-    InvalidRequest,
+    InvalidRequest(String),
     IdCreationError(IdCreationError),
     /// This should only happen if the hash function size is incorrect
     SigningError,
@@ -67,7 +67,6 @@ impl From<SigningError> for ProtocolError {
 
 impl core::fmt::Display for ProtocolError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        #[cfg(debug_assertions)]
         let msg = match self {
             Self::InvalidId(v) => v.to_string(),
             Self::InvalidPublicKey => "Your public key was invalid".into(),
@@ -79,6 +78,7 @@ impl core::fmt::Display for ProtocolError {
             Self::SigningError => "There was a signature error. Perhaps the digest size didn't \
                                    match the signing key"
                 .into(),
+            Self::InvalidRequest(v) => format!("Invalid request: {}", v),
             _ => "".to_string(),
         };
         f.write_str(&msg)
