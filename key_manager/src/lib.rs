@@ -40,7 +40,7 @@ pub use private_key_generator;
 pub mod utils;
 use utils::{b64_len_to_binary_len, padding_trail, StringSanitization};
 
-mod error;
+pub mod error;
 mod macros;
 pub mod prelude;
 mod request;
