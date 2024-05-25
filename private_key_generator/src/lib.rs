@@ -137,6 +137,7 @@ pub mod prelude {
         key_generator::{AnnualVersionConfig, MonthlyVersionConfig, StaticVersionConfig},
         timestamp_policies::use_timestamps,
         typenum::consts::*,
+        utils::{days_to_seconds, months_to_seconds, years_to_seconds},
         BinaryId, CryptoKeyGenerator, KeyGenerator, VersioningConfig,
     };
 }
