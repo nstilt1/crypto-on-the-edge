@@ -140,4 +140,5 @@ pub mod prelude {
         utils::{days_to_seconds, months_to_seconds, years_to_seconds},
         BinaryId, CryptoKeyGenerator, KeyGenerator, VersioningConfig,
     };
+    pub use rand_chacha::*;
 }

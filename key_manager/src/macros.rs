@@ -31,7 +31,18 @@
 ///   AEAD type corresponding to the name
 #[macro_export]
 macro_rules! process_request_with_symmetric_algorithm {
-    ($key_manager:expr, $func_to_call:ident, $request:expr, $request_bytes:expr, $decrypted_inner_request_type:ty, $response:ty, $hasher:ty, $signature:expr, $chosen_symmetric_alg:expr, $is_handshake:literal, $(($name:expr, $alg:ty)),*) => { {
+    (
+        $key_manager:expr,
+        $func_to_call:ident,
+        $request:expr,
+        $request_bytes:expr,
+        $decrypted_inner_request_type:ty,
+        $response:ty,
+        $hasher:ty,
+        $signature:expr,
+        $chosen_symmetric_alg:expr,
+        $is_handshake:literal,
+        $(($name:expr, $alg:ty)),*) => { {
             match $chosen_symmetric_alg {
                 $(
                     $name => {
@@ -45,5 +56,14 @@ macro_rules! process_request_with_symmetric_algorithm {
                 _ => return Err(Box::new($crate::error::ProtocolError::InvalidRequest("Invalid symmetric encryption algorithm".into())))
             }
         }
+    };
+}
+
+/// Conditionally puts out debugging messages based on the "logging" feature.
+#[macro_export]
+macro_rules! debug_log {
+    ($str:expr) => {
+        #[cfg(feature = "logging")]
+        tracing::debug!($str)
     };
 }

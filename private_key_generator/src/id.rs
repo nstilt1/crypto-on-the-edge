@@ -290,7 +290,7 @@ where
         #[cfg(feature = "std")]
         {
             if let Some(expiration_time) = expire_time {
-                if TimestampPolicy::U8.ne(&use_timestamps::Never::U8) {
+                if TimestampPolicy::U8.eq(&use_timestamps::Never::U8) {
                     return Err(InvalidId::IdMustNotExpire);
                 }
                 let now = SystemTime::now()

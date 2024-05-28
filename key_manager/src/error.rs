@@ -67,6 +67,7 @@ impl From<SigningError> for ProtocolError {
 
 impl core::fmt::Display for ProtocolError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        #[cfg(not(debug_assertions))]
         let msg = match self {
             Self::InvalidId(v) => v.to_string(),
             Self::InvalidPublicKey => "Your public key was invalid".into(),
@@ -79,6 +80,22 @@ impl core::fmt::Display for ProtocolError {
                                    match the signing key"
                 .into(),
             Self::InvalidRequest(v) => format!("Invalid request: {}", v),
+            _ => "".to_string(),
+        };
+        #[cfg(debug_assertions)]
+        let msg = match self {
+            Self::InvalidId(v) => v.to_string(),
+            Self::InvalidPublicKey => "Your public key was invalid".into(),
+            Self::InvalidProtobufMessage(v) => v.to_string(),
+            Self::Base64DecodeError(v) => v.to_string(),
+            Self::ClientIdNotSet => "You must successfully call 'decrypt_and_hash_request()' \
+                                     prior to calling this function"
+                .into(),
+            Self::SigningError => "There was a signature error. Perhaps the digest size didn't \
+                                   match the signing key"
+                .into(),
+            Self::InvalidRequest(v) => format!("Invalid request: {}", v),
+            Self::AeadError => "There was an AEAD error".into(),
             _ => "".to_string(),
         };
         f.write_str(&msg)
