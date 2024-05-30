@@ -567,11 +567,9 @@ where
         } else {
             debug_log!("Validating a client ID");
             // validate the client's ID
-            self.client_id = self.key_generator.validate_keyless_id(
-                request.client_id.as_bytes(),
-                b"client ID",
-                None,
-            )?
+            self.client_id = self
+                .validate_keyless_id(&request.client_id, b"client ID", None)?
+                .binary_id
         }
 
         debug_log!("Validing an ecdsa_key_id");
@@ -623,7 +621,7 @@ where
 
         debug_log!("Decrypting payload");
 
-        let decrypted = decryptor.decrypt(
+        let mut decrypted = decryptor.decrypt(
             self.nonce.as_slice().into(),
             &request.data[Aead::NonceSize::USIZE..],
         )?;
@@ -636,13 +634,13 @@ where
         let hasher = Hasher::new_with_prefix(request_bytes);
 
         debug_log!("Decoding decrypted_data");
-        let output = Ok((
-            DecryptedOutput::decode_length_delimited(decrypted.as_slice())?,
-            hasher,
-        ));
+        let decoded = DecryptedOutput::decode_length_delimited(decrypted.as_slice())?;
+
+        let output = Ok((decoded, hasher));
 
         #[cfg(feature = "zeroize")]
-        request.data.zeroize();
+        decrypted.zeroize();
+
         debug_log!("Returned result in decrypt_and_hash_request");
         output
     }
@@ -759,7 +757,7 @@ where
     /// yet. This is mainly used to prevent misuse.
     #[inline]
     fn has_decrypted_request(&self) -> bool {
-        self.symmetric_key.len().eq(&0)
+        self.symmetric_key.len().ne(&0)
     }
 
     /// Returns the client's ID in its Binary Encoding.
@@ -879,7 +877,7 @@ where
         self.rng.fill_bytes(&mut nonce);
         let encryptor = Aead_::new(&key);
         let mut encrypted = encryptor.encrypt(&nonce, data)?;
-        let mut prefix = [version].join(nonce.as_slice());
+        let mut prefix = [&version, nonce.as_slice()].concat();
         encrypted.splice(0..0, prefix.drain(..));
         Ok(encrypted)
     }
@@ -910,6 +908,7 @@ where
     where
         Aead_: AeadCore + KeyInit + Aead,
     {
+        debug_log!("In decrypt_resource()");
         let mut key = aead::Key::<Aead_>::default();
         self.key_generator.generate_resource_decryption_key(
             resource_id,
@@ -920,11 +919,12 @@ where
                 .expect("Tried decrypting a resource that was not encrypted correctly"),
             &mut key,
         );
+        debug_log!("Generated resource decryption key");
 
-        let nonce: &aead::Nonce<Aead_> = data[4..Aead_::NonceSize::USIZE].into();
+        let nonce: &aead::Nonce<Aead_> = data[4..4 + Aead_::NonceSize::USIZE].into();
 
         let decryptor = Aead_::new(&key);
-        let decrypted = decryptor.decrypt(&nonce, data)?;
+        let decrypted = decryptor.decrypt(&nonce, &data[4 + Aead_::NonceSize::USIZE..])?;
         Ok(decrypted)
     }
 }
@@ -937,7 +937,7 @@ mod tests {
     use rand_core::OsRng;
 
     use crate::prelude::*;
-    use sha2::Sha384;
+    use sha2::{digest::FixedOutput, Sha384};
 
     use super::*;
 
@@ -1026,8 +1026,9 @@ mod tests {
         assert_eq!(&encrypted_payload[..nonce.len()], &nonce.to_vec());
         outer.data = encrypted_payload;
 
-        let outer_cloned = outer.clone();
+        let mut outer_cloned = outer.clone();
 
+        // decrypt with function
         let decrypt_output = server_key_manager
             .decrypt_and_hash_request::<ChaCha20Poly1305, Sha384, Request>(
                 &mut outer,
@@ -1039,7 +1040,42 @@ mod tests {
             decrypt_output.is_ok(),
             "Encountered error: {}",
             decrypt_output.unwrap_err().to_string()
-        )
+        );
+
+        let (inner, _hasher) = decrypt_output.unwrap();
+        assert_eq!(inner.client_id, "Handshake");
+
+        test_macro(&mut server_key_manager, &mut outer_cloned);
+    }
+
+    async fn test_macro(
+        server_key_manager: &mut TestKeyManager,
+        request: &mut Request,
+    ) -> Result<(), Box<ProtocolError>> {
+        let (response, signature) = process_request_with_symmetric_algorithm!(
+            server_key_manager,
+            process_request,
+            request,
+            &request.encode_length_delimited_to_vec(),
+            Request,
+            Response,
+            Sha384,
+            vec![0u8; 32],
+            "chacha20poly1305",
+            true,
+            ("chacha20poly1305", ChaCha20Poly1305)
+        );
+        Ok(())
+    }
+
+    async fn process_request<D: Digest + FixedOutput>(
+        key_manager: &mut TestKeyManager,
+        request: &mut Request,
+        hasher: D,
+        signature: Vec<u8>,
+    ) -> Result<Response, ProtocolError> {
+        assert!(true);
+        Ok(Response::default())
     }
 
     #[test]
@@ -1074,6 +1110,29 @@ mod tests {
         server_kdf.expand(ecdh_info, &mut server_key).unwrap();
 
         assert_eq!(server_key, client_key);
+    }
+
+    #[test]
+    fn resource_encryption_and_decryption_roundtrip() {
+        let data = b"test test test";
+        let test_resource_id = b"resource id";
+        let client_id = b"client ID";
+        let misc_info = b"misc info";
+        let mut key_manager = init_key_manager();
+        let encrypted = key_manager
+            .encrypt_resource::<ChaCha20Poly1305>(data, test_resource_id, client_id, misc_info)
+            .unwrap();
+
+        let decrypted = key_manager
+            .decrypt_resource::<ChaCha20Poly1305>(
+                encrypted.as_slice(),
+                test_resource_id,
+                client_id,
+                misc_info,
+            )
+            .unwrap();
+
+        assert_eq!(data, decrypted.as_slice());
     }
 
     #[test]

@@ -1,3 +1,22 @@
+//! Some macros.
+
+/// Conditionally puts out debugging messages based on the "logging" feature.
+#[macro_export]
+macro_rules! error_log {
+    ($($arg:tt)*) => {{
+        #[cfg(feature = "logging")]
+        tracing::error!($($arg)*);
+    }};
+}
+
+#[macro_export]
+macro_rules! debug_log {
+    ($str:expr) => {
+        #[cfg(feature = "logging")]
+        tracing::debug!($str)
+    };
+}
+
 /// Processes a request with a symmetric algorithm chosen by the client from a
 /// list of algorithms.
 ///
@@ -41,29 +60,20 @@ macro_rules! process_request_with_symmetric_algorithm {
         $hasher:ty,
         $signature:expr,
         $chosen_symmetric_alg:expr,
-        $is_handshake:literal,
+        $is_handshake:expr,
         $(($name:expr, $alg:ty)),*) => { {
             match $chosen_symmetric_alg {
                 $(
                     $name => {
                         let (mut decrypted, hasher) = $key_manager.decrypt_and_hash_request::<$alg, $hasher, $decrypted_inner_request_type>($request, $request_bytes, $is_handshake)?;
-
-                        let mut output = $func_to_call(&mut $key_manager, &mut decrypted, hasher, $signature).await?;
+                        $crate::debug_log!("Sending output to function within macro");
+                        let mut output = $func_to_call($key_manager, &mut decrypted, hasher, $signature).await?;
 
                         $key_manager.encrypt_and_sign_response::<$alg, $response>(&mut output)?
                     },
                 )*
-                _ => return Err(Box::new($crate::error::ProtocolError::InvalidRequest("Invalid symmetric encryption algorithm".into())))
+                _ => return Err($crate::error::ProtocolError::InvalidRequest("Invalid symmetric encryption algorithm".into()))?
             }
         }
-    };
-}
-
-/// Conditionally puts out debugging messages based on the "logging" feature.
-#[macro_export]
-macro_rules! debug_log {
-    ($str:expr) => {
-        #[cfg(feature = "logging")]
-        tracing::debug!($str)
     };
 }
