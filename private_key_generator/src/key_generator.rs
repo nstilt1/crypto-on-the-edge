@@ -10,6 +10,7 @@ use crate::{
         years_to_seconds,
     },
 };
+use chacha20::rand_core::RngCore;
 use ecdsa::{
     elliptic_curve::{ops::Invert, CurveArithmetic, FieldBytes, FieldBytesSize, Scalar},
     EcdsaCurve, SignatureSize, SigningKey,
@@ -29,7 +30,6 @@ use hkdf::{
     },
     Hkdf, HmacImpl,
 };
-use rand_core::RngCore;
 use subtle::{ConstantTimeEq, CtOption};
 
 #[cfg(feature = "zeroize")]
@@ -415,7 +415,9 @@ where
     mac: M,
     current_version: u32,
     /// The salt for the current version used for the HKDF and MAC
-    current_version_salt: Output<HkdfDigest>,
+    current_version_mac_salt: Output<M>,
+    current_version_ecc_salt: Output<HkdfDigest>,
+    current_version_symmetric_key_salt: Output<HkdfDigest>,
     current_version_epoch: u64,
     _versioning_config: PhantomData<V>,
     rng: Rng,
@@ -432,7 +434,9 @@ where
 {
     #[inline]
     fn drop(&mut self) {
-        self.current_version_salt.zeroize();
+        self.current_version_mac_salt.zeroize();
+        self.current_version_ecc_salt.zeroize();
+        self.current_version_symmetric_key_salt.zeroize();
     }
 }
 
@@ -498,7 +502,14 @@ where
             let v = (diff / V::VERSION_LIFETIME) as u32;
             if self.current_version != v {
                 self.current_version = v;
-                self.rng.get_version_salt(v, &mut self.current_version_salt);
+                self.rng
+                    .get_version_mac_salt(v, &mut self.current_version_mac_salt);
+                self.rng
+                    .get_version_ecc_salt(v, &mut self.current_version_ecc_salt);
+                self.rng.get_version_symmetric_key_salt(
+                    v,
+                    &mut self.current_version_symmetric_key_salt,
+                );
                 self.current_version_epoch = Self::get_version_epoch(v)
             }
         }
@@ -565,11 +576,11 @@ where
             Mac::update(&mut self.mac, d)
         }
         if self.current_version != version {
-            let mut salt: Output<HkdfDigest> = Default::default();
-            self.rng.get_version_salt(version, &mut salt);
+            let mut salt: Output<M> = Default::default();
+            self.rng.get_version_mac_salt(version, &mut salt);
             Mac::update(&mut self.mac, &salt);
         } else {
-            Mac::update(&mut self.mac, &self.current_version_salt);
+            Mac::update(&mut self.mac, &self.current_version_mac_salt);
         }
         self.mac.finalize_fixed_reset()
     }
@@ -650,8 +661,12 @@ where
         let mut rng = R::init_rng(&mut rng_seed);
 
         let current_version = Self::get_current_version();
-        let mut salt: Output<HkdfDigest> = Default::default();
-        R::get_version_salt(&mut rng, current_version, &mut salt);
+        let mut mac_salt: Output<M> = Default::default();
+        let mut ecc_salt: Output<HkdfDigest> = Default::default();
+        let mut symmetric_key_salt: Output<HkdfDigest> = Default::default();
+        R::get_version_mac_salt(&mut rng, current_version, &mut mac_salt);
+        R::get_version_ecc_salt(&mut rng, current_version, &mut ecc_salt);
+        R::get_version_symmetric_key_salt(&mut rng, current_version, &mut symmetric_key_salt);
         (
             prk,
             Self {
@@ -661,7 +676,9 @@ where
                 rng,
                 current_version,
                 current_version_epoch: Self::get_version_epoch(current_version),
-                current_version_salt: salt,
+                current_version_mac_salt: mac_salt,
+                current_version_ecc_salt: ecc_salt,
+                current_version_symmetric_key_salt: symmetric_key_salt,
             },
         )
     }
@@ -689,8 +706,12 @@ where
         let mut rng = R::init_rng(&mut rng_seed);
 
         let current_version = Self::get_current_version();
-        let mut salt: Output<HkdfDigest> = Default::default();
-        R::get_version_salt(&mut rng, current_version, &mut salt);
+        let mut mac_salt: Output<M> = Default::default();
+        let mut ecc_salt: Output<HkdfDigest> = Default::default();
+        let mut symmetric_key_salt: Output<HkdfDigest> = Default::default();
+        R::get_version_mac_salt(&mut rng, current_version, &mut mac_salt);
+        R::get_version_ecc_salt(&mut rng, current_version, &mut ecc_salt);
+        R::get_version_symmetric_key_salt(&mut rng, current_version, &mut symmetric_key_salt);
         Self {
             hkdf: Hkdf::<HkdfDigest, I>::from_prk(&kdf_prk)
                 .expect("Your prk was not strong enough"),
@@ -699,7 +720,9 @@ where
             rng,
             current_version,
             current_version_epoch: Self::get_version_epoch(current_version),
-            current_version_salt: salt,
+            current_version_mac_salt: mac_salt,
+            current_version_ecc_salt: ecc_salt,
+            current_version_symmetric_key_salt: symmetric_key_salt,
         }
     }
 
@@ -1171,7 +1194,12 @@ where
         let version = self.current_version.to_le_bytes();
         self.hkdf
             .expand_multi_info(
-                &[resource_id, client_id, misc_info, &version],
+                &[
+                    resource_id,
+                    client_id,
+                    misc_info,
+                    &self.current_version_symmetric_key_salt,
+                ],
                 symmetric_key,
             )
             .expect("Your symmetric key should not be very large.");
@@ -1180,15 +1208,31 @@ where
 
     #[inline]
     fn generate_resource_decryption_key(
-        &self,
+        &mut self,
         resource_id: &[u8],
         client_id: &[u8],
         misc_info: &[u8],
         version: &[u8; 4],
         symmetric_key: &mut [u8],
     ) {
+        let v = u32::from_le_bytes(*version);
+        let version_symmetric_key_salt = if v == self.current_version {
+            self.current_version_symmetric_key_salt.clone()
+        } else {
+            let mut salt: Output<HkdfDigest> = Default::default();
+            self.rng.get_version_symmetric_key_salt(v, &mut salt);
+            salt
+        };
         self.hkdf
-            .expand_multi_info(&[resource_id, client_id, misc_info, version], symmetric_key)
+            .expand_multi_info(
+                &[
+                    resource_id,
+                    client_id,
+                    misc_info,
+                    &version_symmetric_key_salt,
+                ],
+                symmetric_key,
+            )
             .expect("Your symmetric key should not be very large.")
     }
 }
@@ -1201,11 +1245,11 @@ mod tests {
     use crate::typenum::consts::{U48, U5};
     use crate::BinaryId;
     use crate::{traits::CryptoKeyGenerator, KeyGenerator};
+    use chacha20::ChaCha8Rng;
     use hkdf::hmac::Hmac;
+    use rand::rngs::OsRng;
     use rand::rngs::StdRng;
     use rand::SeedableRng;
-    use rand_chacha::ChaCha8Rng;
-    use rand_core::OsRng;
     use sha2::Sha256;
 
     use super::*;
@@ -1327,9 +1371,9 @@ mod tests {
     /// Some validation tests
     mod validation {
 
+        use chacha20::ChaCha8Rng;
         use elliptic_curve::consts::{U48, U5};
-        use rand_chacha::ChaCha8Rng;
-        use rand_core::OsRng;
+        use rand::rngs::OsRng;
 
         use crate::{
             id::timestamp_policies::use_timestamps, key_generator::StaticVersionConfig, BinaryId,

@@ -1,6 +1,6 @@
 use private_key_generator::prelude::*;
 use hkdf::hmac::Hmac;
-use rand_chacha::ChaCha8Rng;
+use private_key_generator::prelude::ChaCha8Rng;
 use rand::rngs::OsRng;
 use sha2::Sha256;
 

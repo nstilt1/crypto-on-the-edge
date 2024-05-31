@@ -4,11 +4,14 @@ use crate::{
     error::{IdCreationError, InvalidId},
     VersionConfig,
 };
+use chacha20::{
+    rand_core::{RngCore, SeedableRng},
+    ChaCha12Rng, ChaCha20Rng, ChaCha8Rng,
+};
 use ecdsa::{EcdsaCurve, SignatureSize, SigningKey};
 use elliptic_curve::{
     ecdh::SharedSecret,
     ops::Invert,
-    rand_core::RngCore,
     sec1::{FromEncodedPoint, ModulusSize, ToEncodedPoint},
     AffinePoint, CurveArithmetic, FieldBytesSize, JwkParameters, PublicKey, Scalar,
 };
@@ -16,7 +19,6 @@ use hkdf::hmac::digest::{
     array::{Array, ArraySize},
     FixedOutputReset, KeyInit, Mac, OutputSizeUser,
 };
-use rand_chacha::{rand_core::SeedableRng, ChaCha12Rng, ChaCha20Rng, ChaCha8Rng};
 use subtle::CtOption;
 #[cfg(feature = "zeroize")]
 use zeroize::Zeroize;
@@ -121,10 +123,19 @@ pub trait AllowedRngs {
         seed.as_mut()
     }
 
-    /// Outputs the salt to be used for a specific version
-    fn get_version_salt(&mut self, version: u32, output_salt: &mut [u8]);
+    /// Outputs the MAC salt to be used for a specific version
+    fn get_version_mac_salt(&mut self, version: u32, output_salt: &mut [u8]);
+
+    /// Outputs the ecc key salt to be used for a specific version
+    fn get_version_ecc_salt(&mut self, version: u32, output_salt: &mut [u8]);
+
+    /// Outputs the symmetric key salt to be used for a specific version
+    fn get_version_symmetric_key_salt(&mut self, version: u32, output_salt: &mut [u8]);
 }
 
+const MAC_STREAM_WORD: u32 = 33;
+const ECC_STREAM_WORD: u32 = 44;
+const SYMM_STREAM_WORD: u32 = 55;
 macro_rules! allow_chacha_rng {
     ($($Rng:ident),*) => {
         $(impl AllowedRngs for $Rng {
@@ -137,9 +148,21 @@ macro_rules! allow_chacha_rng {
                 rng
             }
 
-            fn get_version_salt(&mut self, version: u32, output_salt: &mut [u8]) {
-                self.set_stream(version as u64);
-                self.set_word_pos(0);
+            fn get_version_mac_salt(&mut self, version: u32, output_salt: &mut [u8]) {
+                self.set_stream([MAC_STREAM_WORD, MAC_STREAM_WORD, version]);
+                self.set_block_pos(0);
+                self.fill_bytes(output_salt)
+            }
+
+            fn get_version_ecc_salt(&mut self, version: u32, output_salt: &mut [u8]) {
+                self.set_stream([ECC_STREAM_WORD, ECC_STREAM_WORD, version]);
+                self.set_block_pos(0);
+                self.fill_bytes(output_salt);
+            }
+
+            fn get_version_symmetric_key_salt(&mut self, version: u32, output_salt: &mut [u8]) {
+                self.set_stream([SYMM_STREAM_WORD, SYMM_STREAM_WORD, version]);
+                self.set_block_pos(0);
                 self.fill_bytes(output_salt)
             }
         })*
@@ -513,7 +536,7 @@ pub trait CryptoKeyGenerator: Sized {
     /// Panics if the `symmetric_key` size is larger than `255 * Hash Output
     /// Size`.
     fn generate_resource_decryption_key(
-        &self,
+        &mut self,
         resource_id: &[u8],
         client_id: &[u8],
         misc_info: &[u8],

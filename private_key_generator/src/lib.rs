@@ -101,6 +101,7 @@
 //! any information about the private key generation.
 
 #![no_std]
+#![allow(incomplete_features)]
 #![feature(generic_const_exprs)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![forbid(unsafe_code)]
@@ -140,5 +141,5 @@ pub mod prelude {
         utils::{days_to_seconds, months_to_seconds, years_to_seconds},
         BinaryId, CryptoKeyGenerator, KeyGenerator, VersioningConfig,
     };
-    pub use rand_chacha::*;
+    pub use chacha20::*;
 }

@@ -27,7 +27,7 @@ use private_key_generator::Zeroize;
 
 use aead::{Aead, AeadCore, AeadInPlace, KeyInit};
 
-use rand_core::{CryptoRngCore, SeedableRng};
+use rand_core::{CryptoRng, SeedableRng};
 
 use base64::{
     alphabet::Alphabet,
@@ -157,7 +157,7 @@ pub struct HttpPrivateKeyManager<
     ClientId: EncodedId,
     EcdhKeyId: EncodedId,
     EcdsaKeyId: EncodedId,
-    FastRng: CryptoRngCore + SeedableRng,
+    FastRng: CryptoRng + SeedableRng,
 {
     /// the key generator. You may use this directly if you need to.
     pub key_generator: KeyGen,
@@ -208,7 +208,7 @@ where
     CId: EncodedId,
     EcdhKId: EncodedId,
     EcdsaKId: EncodedId,
-    FastRng: CryptoRngCore + SeedableRng,
+    FastRng: CryptoRng + SeedableRng,
 {
     /// Initializes this structure using your Key Generator.
     ///
@@ -934,10 +934,10 @@ mod tests {
     use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
     use p384::{ecdh::EphemeralSecret, NistP384};
     use private_key_generator::hkdf::hmac::Hmac;
-    use rand_core::OsRng;
+    use rand_core_previous::OsRng;
 
     use crate::prelude::*;
-    use sha2::{digest::FixedOutput, Sha384};
+    use sha2::Sha384;
 
     use super::*;
 
@@ -1026,7 +1026,7 @@ mod tests {
         assert_eq!(&encrypted_payload[..nonce.len()], &nonce.to_vec());
         outer.data = encrypted_payload;
 
-        let mut outer_cloned = outer.clone();
+        let outer_cloned = outer.clone();
 
         // decrypt with function
         let decrypt_output = server_key_manager
@@ -1044,38 +1044,6 @@ mod tests {
 
         let (inner, _hasher) = decrypt_output.unwrap();
         assert_eq!(inner.client_id, "Handshake");
-
-        test_macro(&mut server_key_manager, &mut outer_cloned);
-    }
-
-    async fn test_macro(
-        server_key_manager: &mut TestKeyManager,
-        request: &mut Request,
-    ) -> Result<(), Box<ProtocolError>> {
-        let (response, signature) = process_request_with_symmetric_algorithm!(
-            server_key_manager,
-            process_request,
-            request,
-            &request.encode_length_delimited_to_vec(),
-            Request,
-            Response,
-            Sha384,
-            vec![0u8; 32],
-            "chacha20poly1305",
-            true,
-            ("chacha20poly1305", ChaCha20Poly1305)
-        );
-        Ok(())
-    }
-
-    async fn process_request<D: Digest + FixedOutput>(
-        key_manager: &mut TestKeyManager,
-        request: &mut Request,
-        hasher: D,
-        signature: Vec<u8>,
-    ) -> Result<Response, ProtocolError> {
-        assert!(true);
-        Ok(Response::default())
     }
 
     #[test]
