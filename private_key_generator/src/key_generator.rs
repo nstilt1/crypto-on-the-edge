@@ -1216,24 +1216,27 @@ where
         symmetric_key: &mut [u8],
     ) {
         let v = u32::from_le_bytes(*version);
-        let version_symmetric_key_salt = if v == self.current_version {
-            self.current_version_symmetric_key_salt.clone()
-        } else {
-            let mut salt: Output<HkdfDigest> = Default::default();
-            self.rng.get_version_symmetric_key_salt(v, &mut salt);
-            salt
-        };
-        self.hkdf
-            .expand_multi_info(
-                &[
-                    resource_id,
-                    client_id,
-                    misc_info,
-                    &version_symmetric_key_salt,
-                ],
-                symmetric_key,
-            )
-            .expect("Your symmetric key should not be very large.")
+        match v == self.current_version {
+            true => self
+                .hkdf
+                .expand_multi_info(
+                    &[
+                        resource_id,
+                        client_id,
+                        misc_info,
+                        &self.current_version_symmetric_key_salt,
+                    ],
+                    symmetric_key,
+                )
+                .expect("Your symmetric key should not be very large"),
+            false => {
+                let mut salt: Output<HkdfDigest> = Default::default();
+                self.rng.get_version_symmetric_key_salt(v, &mut salt);
+                self.hkdf
+                    .expand_multi_info(&[resource_id, client_id, misc_info, &salt], symmetric_key)
+                    .expect("Your symmetric key should not be very large")
+            }
+        }
     }
 }
 
