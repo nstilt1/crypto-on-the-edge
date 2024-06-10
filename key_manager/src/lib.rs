@@ -391,8 +391,7 @@ where
         let binary_id = self
             .key_generator
             .validate_ecdsa_key_id::<C, IdType>(&decoded, associated_data)?;
-        let encoded = self.b64_engine.encode(binary_id.as_ref());
-        Ok(Id::new(&binary_id, encoded, associated_data))
+        Ok(Id::new(&binary_id, id.to_string(), associated_data))
     }
 
     /// Validates an ECDSA key id.
@@ -434,8 +433,7 @@ where
         let binary_id =
             self.key_generator
                 .validate_keyless_id::<IdType>(&decoded, id_type, associated_data)?;
-        let encoded = self.b64_engine.encode(binary_id.as_ref());
-        Ok(Id::new(&binary_id, encoded, associated_data))
+        Ok(Id::new(&binary_id, id.to_string(), associated_data))
     }
 
     /// Signs data with a signing key derived from a key ID.
@@ -621,6 +619,7 @@ where
 
         debug_log!("Decrypting payload");
 
+        #[allow(unused_mut)]
         let mut decrypted = decryptor.decrypt(
             self.nonce.as_slice().into(),
             &request.data[Aead::NonceSize::USIZE..],
@@ -925,6 +924,7 @@ where
 
         let decryptor = Aead_::new(&key);
         let decrypted = decryptor.decrypt(&nonce, &data[4 + Aead_::NonceSize::USIZE..])?;
+        debug_log!("Decrypted the resource");
         Ok(decrypted)
     }
 }
