@@ -17,62 +17,72 @@ macro_rules! debug_log {
     };
 }
 
-/// Processes a request with a symmetric algorithm chosen by the client from a
-/// list of algorithms.
-///
-/// This could be done with a hash algorithm as well as an elliptic curve, but
-/// that would take a bit more code. The easiest thing to do might be to make
-/// different versions of the same function using generic parameters.
+/// Defines a `handle_crypto` function that selects a symmetric encryption
+/// algorithm at runtime for decrypting the request and encrypting the response.
 ///
 /// # Arguments
 ///
-/// * `key_manager` - the HttpPrivateKeyManager
-/// * `func_to_call` - the function that will be called to process the inner
-///   content. It needs to take the following parameters and needs to output a
-///   `DecryptedOutput`:
-///   * `&mut HttpPrivateKeyManager`
-///   * `DecryptedOutput` ($request)
-///   * `$hasher`
-/// * `request` - the request Protobuf Message
-/// * `request_bytes` - the bytes of the Protobuf Request, used for hashing
-/// * `decrypted_inner_request_type` - the inner request that `$func_to_call` is
-///   expecting as input
-/// * `response` - the response type
-/// * `hasher` - the hash function to use for verifying the signature
-/// * `signature` - the signature on the request (possibly in the header) that
-///   will need to be validated in `func_to_call`
-/// * `chosen_symmetric_alg` - the user's chosen symmetric encryption algorithm.
-///   `ChaCha20Poly1305` is faster on `aarch64`
-/// * `is_handshake` - whether or not this request is supposed to be an initial
-///   handshake
-/// * `(name, alg)` - a series of tuples of (str, ty) where the str is the
-///   string representation of the symmetric algorithm name, and the type is the
-///   AEAD type corresponding to the name
+/// * `request_type` - the Protobuf payload that the request is meant to have,
+///   and it is the first argument type that `process_request` needs to have.
+/// * `response_type` - the Protobuf payload that the response is meant to have,
+///   and it is the output type that `process_request` needs to have.
+/// * `error_type` - the error type returned by the `handle_crypto` function.
+///   This error type needs to be able to convert the `prost::DecodeError` into
+///   itself, as well as this crate's errors.
+/// * `hash_function` - the hash function that will be used for signing and
+///   verifying the request and response
+/// * `(symmetric_alg_name, symmetric_alg)` - the lowercase symmetric encryption
+///   algorithm names and their associated types
+///
+/// # Example
+///
+/// ```norun
+/// impl_handle_crypto!(
+///     CreateLicenseRequest, // the protobuf message request data
+///     CreateLicenseResponse,// the output of `process_request`
+///     ApiError,             // the error type of handle_crypto
+///     EcdsaDigest,          // the ECDSA digest type
+///     ("chacha20poly1305", ChaCha20Poly1305), // The symmetric ciphers
+///     ("aes-128-gcm", Aes128Gcm),             // that you choose to allow
+///     ("aes-256-gcm", Aes256Gcm)              // for processing requests
+/// );
+///
+/// async fn process_request<D: Digest + FixedOutput>(
+///     key_manager: &mut KeyManager,
+///     request: &mut CreateLicenseRequest,
+///     hasher: D,
+///     signature: Vec<u8>
+/// ) -> Result<CreateLicenseResponse, ApiError> {
+///     
+/// ```
 #[macro_export]
-macro_rules! process_request_with_symmetric_algorithm {
-    (
-        $key_manager:expr,
-        $func_to_call:ident,
-        $request:expr,
-        $request_bytes:expr,
-        $decrypted_inner_request_type:ty,
-        $response:ty,
-        $hasher:ty,
-        $signature:expr,
-        $chosen_symmetric_alg:expr,
-        $is_handshake:expr,
-        $(($name:expr, $alg:ty)),*) => { {
-            match $chosen_symmetric_alg {
+macro_rules! impl_handle_crypto {
+    ($request_type:ty, $response_type:ty, $error_type:ty, $hash_function:ty, $(($symmetric_alg_name:expr, $symmetric_alg:ty)),*) => {
+        /// This function uses a match statement to select a symmetric encryption algorithm, then it:
+        ///
+        /// * decodes the request to a `Request` with length delimiting
+        /// * decrypts the payload within the Request
+        /// * sends the decrypted request and hash to `process_request`
+        /// * Takes the output of `process_request` and encrypts it, returning the protobuf-encoded `Response` and binary signature.
+        async fn handle_crypto(
+            key_manager: &mut KeyManager,
+            request_bytes: &[u8],
+            is_handshake: bool,
+            signature: Vec<u8>
+        ) -> Result<($crate::Response, Vec<u8>), ApiError> {
+            let mut request = $crate::Request::decode_length_delimited(request_bytes)?;
+            let chosen_symmetric_algorithm = request.symmetric_algorithm.to_lowercase();
+            match chosen_symmetric_algorithm.as_str() {
                 $(
-                    $name => {
-                        let (mut decrypted, hasher) = $key_manager.decrypt_and_hash_request::<$alg, $hasher, $decrypted_inner_request_type>($request, $request_bytes, $is_handshake)?;
-                        $crate::debug_log!("Sending output to function within macro");
-                        let mut output = $func_to_call($key_manager, &mut decrypted, hasher, $signature).await?;
+                    $symmetric_alg_name => {
+                        let (mut decrypted, hasher) = key_manager.decrypt_and_hash_request::<$symmetric_alg, $hash_function, $request_type>(&mut request, request_bytes, is_handshake)?;
+                        let mut output = process_request(key_manager, &mut decrypted, hasher, signature).await?;
+                        let (response, signature) = key_manager.encrypt_and_sign_response::<$symmetric_alg, $response_type>(&mut output)?;
+                        Ok((response, signature.to_vec()))
 
-                        $key_manager.encrypt_and_sign_response::<$alg, $response>(&mut output)?
-                    },
+                    }
                 )*
-                _ => return Err($crate::error::ProtocolError::InvalidRequest("Invalid symmetric encryption algorithm".into()))?
+                _ => return Err($crate::error::ProtocolError::InvalidRequest("Invalid symmetric encryption algorithm".into()).into())
             }
         }
     };
