@@ -1141,4 +1141,71 @@ mod tests {
             );
         assert!(result.is_ok())
     }
+
+    /// Initializes a generic key manager with a generic key generator.
+    macro_rules! init_generic_key_manager {
+        ($key_manager:ty, $key_generator:ty) => {
+            <$key_manager>::from_key_generator(
+                <$key_generator>::new(&[32u8; 48], b"software licensor"),
+                Alphabet::new("qwertyuiopasdfghjklzxcvbnm1234567890QWERTYUIOPASDFGHJKLZXCVBNM/_")
+                    .unwrap(),
+            )
+        };
+    }
+
+    /// This test should ensure that resource decryption is possible after
+    /// different versions pass. I will accomplish this using different
+    /// Version Configs that have different epochs.
+    #[test]
+    fn db_decryption_with_different_versions() {
+        type TemplateVersionConfig<const EPOCH: u64> = VersioningConfig<
+            EPOCH,
+            { years_to_seconds(5) }, // version lifetime
+            32,                      // version bits
+            32,                      // timestamp bits
+            8,                       // timestamp precision loss
+            { years_to_seconds(1) }, // max expiration time
+        >;
+
+        type OldVersionConfig = TemplateVersionConfig<0>;
+        type NewVersionConfig = TemplateVersionConfig<1719159990>; // june 23, 2024
+        type KeyGeneratorTemplate<VersionConfig> =
+            KeyGenerator<Hmac<Sha384>, VersionConfig, ChaCha8Rng, Sha384>;
+
+        type OldKeyGenerator = KeyGeneratorTemplate<OldVersionConfig>;
+        type NewKeyGenerator = KeyGeneratorTemplate<NewVersionConfig>;
+
+        type KeyManagerTemplate<KeyGeneratorTemp> = HttpPrivateKeyManager<
+            KeyGeneratorTemp,
+            NistP384,
+            Sha384,
+            NistP384,
+            Sha384,
+            BigId,
+            BigId,
+            BigId,
+            ChaCha8Rng,
+        >;
+
+        let mut old_key_manager =
+            init_generic_key_manager!(KeyManagerTemplate<OldKeyGenerator>, OldKeyGenerator);
+
+        let data = [5u8; 256];
+        let resource_id = [1, 1, 2, 3, 5, 8, 13, 21];
+        let client_id = [1, 2, 3, 4, 5, 6];
+        let encrypted = old_key_manager
+            .encrypt_resource::<ChaCha20Poly1305>(&data, &resource_id, &client_id, &[])
+            .unwrap();
+
+        assert_ne!(&encrypted, &data);
+
+        let mut new_key_manager =
+            init_generic_key_manager!(KeyManagerTemplate<NewKeyGenerator>, NewKeyGenerator);
+
+        let decrypted = new_key_manager
+            .decrypt_resource::<ChaCha20Poly1305>(&encrypted, &resource_id, &client_id, &[])
+            .unwrap();
+
+        assert_eq!(&data, &decrypted.as_slice());
+    }
 }

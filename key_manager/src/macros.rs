@@ -36,7 +36,7 @@ macro_rules! debug_log {
 ///
 /// # Example
 ///
-/// ```norun
+/// ```ignore
 /// impl_handle_crypto!(
 ///     CreateLicenseRequest, // the protobuf message request data
 ///     CreateLicenseResponse,// the output of `process_request`
