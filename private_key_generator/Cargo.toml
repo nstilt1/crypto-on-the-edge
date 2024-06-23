@@ -23,7 +23,8 @@ doctest = false # need to change this before publishing
 [dependencies]
 chacha20 = { git = "https://github.com/RustCrypto/stream-ciphers.git", branch = "master", package = "chacha20", features = ["rng"] }
 ecdsa = { version = "0.17.0-pre.5", features = ["signing"]}
-elliptic-curve = { version = "0.14.0-pre.5", features = ["ecdh", "jwk"] }
+elliptic-curve = { version = "0.14.0-pre.5", features = ["ecdh", "jwk", "pem", "pkcs8"] }
+#elliptic-curve = { version = "0.14.0-pre.5", git = "https://github.com/RustCrypto/traits.git", branch = "master", package = "elliptic-curve", features = ["ecdh", "jwk", "pem"] }
 hkdf = "=0.13.0-pre.3"
 #rand_chacha = { version = "0.3" }
 #rand_core = "0.6"

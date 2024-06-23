@@ -10,6 +10,7 @@ use private_key_generator::{
     elliptic_curve::{
         array::ArraySize,
         ops::Invert,
+        pkcs8::AssociatedOid,
         point::PointCompression,
         sec1::{FromEncodedPoint, ModulusSize, ToEncodedPoint},
         subtle::CtOption,
@@ -146,7 +147,7 @@ pub struct HttpPrivateKeyManager<
     FastRng,
 > where
     KeyGen: CryptoKeyGenerator,
-    Ecdh: CurveArithmetic + JwkParameters + PointCompression,
+    Ecdh: CurveArithmetic + JwkParameters + PointCompression + AssociatedOid,
     FieldBytesSize<Ecdh>: ModulusSize,
     AffinePoint<Ecdh>: FromEncodedPoint<Ecdh> + ToEncodedPoint<Ecdh>,
     EcdhKdfDigest: BlockSizeUser + Clone + Digest,
@@ -197,7 +198,7 @@ impl<KeyGen, Ecdh, EcdhKdf, Ecdsa, EcdsaDigest, CId, EcdhKId, EcdsaKId, FastRng>
     >
 where
     KeyGen: CryptoKeyGenerator,
-    Ecdh: CurveArithmetic + JwkParameters + PointCompression,
+    Ecdh: CurveArithmetic + JwkParameters + PointCompression + AssociatedOid,
     FieldBytesSize<Ecdh>: ModulusSize,
     AffinePoint<Ecdh>: FromEncodedPoint<Ecdh> + ToEncodedPoint<Ecdh>,
     EcdhKdf: BlockSizeUser + Clone + Digest,
@@ -723,6 +724,7 @@ where
         let next_key = EcdhKey {
             ecdh_key_id: key_id.as_ref().to_vec(),
             ecdh_public_key: pubkey.to_sec1_bytes().as_ref().to_vec(),
+            ecdh_public_key_pem: pubkey.to_string(),
         };
 
         let resp = Response {

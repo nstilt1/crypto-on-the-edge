@@ -6,6 +6,8 @@ pub struct EcdhKey {
     pub ecdh_key_id: ::prost::alloc::vec::Vec<u8>,
     #[prost(bytes = "vec", tag = "2")]
     pub ecdh_public_key: ::prost::alloc::vec::Vec<u8>,
+    #[prost(string, tag = "3")]
+    pub ecdh_public_key_pem: ::prost::alloc::string::String,
 }
 /// An API response from the service.
 ///
@@ -21,12 +23,6 @@ pub struct Response {
     /// Encrypted payload with the nonce prefixed to the encrypted data
     #[prost(bytes = "vec", tag = "2")]
     pub data: ::prost::alloc::vec::Vec<u8>,
-    /// the `salt` string for use in an HKDF for decrypting `data`
-    #[prost(string, tag = "3")]
-    pub ecdh_salt: ::prost::alloc::string::String,
-    /// the `info` string for use in an HKDF for decrypting `data`
-    #[prost(string, tag = "4")]
-    pub ecdh_info: ::prost::alloc::string::String,
     /// The protobuf-encoded key information for the client to use for their next
     /// request
     #[prost(message, optional, tag = "5")]

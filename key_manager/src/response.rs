@@ -6,6 +6,8 @@ pub struct EcdhKey {
     pub ecdh_key_id: ::prost::alloc::vec::Vec<u8>,
     #[prost(bytes = "vec", tag = "2")]
     pub ecdh_public_key: ::prost::alloc::vec::Vec<u8>,
+    #[prost(string, tag = "3")]
+    pub ecdh_public_key_pem: ::prost::alloc::string::String,
 }
 /// An API response from the service.
 ///
