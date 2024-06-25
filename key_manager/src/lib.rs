@@ -2,6 +2,7 @@
 //! encrypted responses to encrypted requests using ECDH and ECDSA.
 
 use core::marker::PhantomData;
+use decrypt_info::ClientEcdhPubkey;
 use private_key_generator::{
     ecdsa::{
         hazmat::DigestPrimitive, signature::DigestSigner, EcdsaCurve, Signature, SignatureSize,
@@ -21,7 +22,10 @@ use private_key_generator::{
     typenum::Unsigned,
     CryptoKeyGenerator, Digest, EncodedId,
 };
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    str::FromStr,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 #[cfg(feature = "zeroize")]
 use private_key_generator::Zeroize;
@@ -591,8 +595,19 @@ where
         )?;
 
         debug_log!("Setting client_public_key");
-        let client_public_key =
-            PublicKey::<Ecdh>::from_sec1_bytes(&decrypt_info.client_ecdh_pubkey)?;
+        let client_public_key: PublicKey<Ecdh> = match &decrypt_info.client_ecdh_pubkey {
+            Some(value) => match value {
+                ClientEcdhPubkey::Pem(v) => PublicKey::<Ecdh>::from_str(v.as_str())?,
+                ClientEcdhPubkey::Der(v) => PublicKey::<Ecdh>::from_sec1_bytes(&v)?,
+            },
+            None => {
+                return Err(ProtocolError::InvalidRequest(
+                    "client_ecdh_pubkey must be set to either the PEM encoded public key or the \
+                     DER encoded public ECDH key."
+                        .into(),
+                ))
+            }
+        };
 
         debug_log!("Getting the shared_secret");
         let shared_secret = self.key_generator.ecdh_using_key_id(
@@ -1001,7 +1016,9 @@ mod tests {
             data: Vec::new(),
             decryption_info: Some(DecryptInfo {
                 server_ecdh_key_id: server_ecdh_keys.0.as_ref().to_vec(),
-                client_ecdh_pubkey: client_key.public_key().to_sec1_bytes().to_vec(),
+                client_ecdh_pubkey: Some(ClientEcdhPubkey::Der(
+                    client_key.public_key().to_sec1_bytes().to_vec(),
+                )),
                 ecdh_info: ecdh_info.clone(),
                 ecdh_salt: ecdh_salt.clone(),
             }),

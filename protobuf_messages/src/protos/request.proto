@@ -7,8 +7,12 @@ message DecryptInfo {
     // the ecdh key used for decrypting the request
     bytes server_ecdh_key_id = 1;
 
-    // the client's ecdh pubkey for decrypting the request
-    bytes client_ecdh_pubkey = 2;
+    // the client's ecdh pubkey for decrypting the request. This can 
+    // be PEM encoded or DER encoded
+    oneof client_ecdh_pubkey {
+        string pem = 5;
+        bytes der = 6;
+    }
 
     // the `info` string for use in an HKDF for decrypting the request
     bytes ecdh_info = 3;
