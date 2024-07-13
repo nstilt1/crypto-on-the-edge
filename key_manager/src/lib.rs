@@ -575,6 +575,8 @@ where
                 .binary_id
         }
 
+        let associated_data = self.client_id.as_ref();
+
         debug_log!("Validing an ecdsa_key_id");
         // validate signing key ID. If we wanted to... we could associate the signing
         // key with a client. Not entirely sure how useful it would be, but it doesn't
@@ -583,10 +585,8 @@ where
             .key_generator
             .validate_ecdsa_key_id::<Ecdsa, EcdsaKId>(
                 request.server_ecdsa_key_id.as_slice(),
-                Some(self.client_id.as_ref()),
+                Some(associated_data),
             )?;
-
-        let associated_data = request.client_id.as_bytes();
 
         debug_log!("Validating an ECDH Key ID");
         let ecdh_key_id = self.key_generator.validate_ecdh_key_id::<EcdhKId>(
@@ -1224,5 +1224,43 @@ mod tests {
             .unwrap();
 
         assert_eq!(&data, &decrypted.as_slice());
+    }
+
+    #[test]
+    fn associated_ecdh_keys() {
+        let mut key_manager = init_key_manager();
+
+        let client_id = key_manager
+            .generate_keyless_id::<BigId>("", b"test", None, None)
+            .unwrap();
+
+        let associated_data = client_id.binary_id.as_ref();
+
+        let (generated_ecdh_key_id, generated_ecdh_pubkey) = key_manager
+            .key_generator
+            .generate_ecdh_pubkey_and_id::<NistP384, BigId>(
+                &[],
+                None,
+                Some(associated_data),
+                &mut key_manager.rng,
+            )
+            .unwrap();
+
+        let client_ecdh_key = EphemeralSecret::random(&mut OsRng);
+
+        let initial_shared_secret = client_ecdh_key.diffie_hellman(&generated_ecdh_pubkey);
+
+        let second_shared_secret = key_manager
+            .key_generator
+            .ecdh_using_key_id::<NistP384, BigId>(
+                &generated_ecdh_key_id,
+                Some(associated_data),
+                client_ecdh_key.public_key(),
+            );
+
+        assert_eq!(
+            initial_shared_secret.raw_secret_bytes(),
+            second_shared_secret.raw_secret_bytes()
+        );
     }
 }
