@@ -24,9 +24,9 @@ use hkdf::hmac::digest::{
     typenum::Unsigned,
 };
 
+use chacha20::rand_core::RngCore;
 use core::cmp::min;
 use core::marker::PhantomData;
-use elliptic_curve::rand_core::RngCore;
 
 #[cfg(feature = "std")]
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -290,7 +290,7 @@ where
         #[cfg(feature = "std")]
         {
             if let Some(expiration_time) = expire_time {
-                if TimestampPolicy::U8.ne(&use_timestamps::Never::U8) {
+                if TimestampPolicy::U8.eq(&use_timestamps::Never::U8) {
                     return Err(InvalidId::IdMustNotExpire);
                 }
                 let now = SystemTime::now()
@@ -391,8 +391,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use chacha20::rand_core::OsRng;
     use hkdf::hmac::digest::consts::{U48, U5};
-    use rand_core::OsRng;
 
     use crate::VersioningConfig;
 

@@ -3,3 +3,4 @@ rustfmt.toml
 *.sh
 private_key_generator_docs/
 key_manager_docs/
+zero_stack/

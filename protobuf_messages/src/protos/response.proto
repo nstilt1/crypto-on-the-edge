@@ -6,6 +6,7 @@ package response;
 message EcdhKey {
     bytes ecdh_key_id = 1;
     bytes ecdh_public_key = 2;
+    string ecdh_public_key_pem = 3;
 }
 
 // An API response from the service.
@@ -19,12 +20,6 @@ message EcdhKey {
 message Response {
     // Encrypted payload with the nonce prefixed to the encrypted data
     bytes data = 2;
-
-    // the `salt` string for use in an HKDF for decrypting `data`
-    string ecdh_salt = 3;
-
-    // the `info` string for use in an HKDF for decrypting `data`
-    string ecdh_info = 4;
 
     // The protobuf-encoded key information for the client to use for their next 
     // request

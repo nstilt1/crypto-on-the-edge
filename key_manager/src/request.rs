@@ -5,15 +5,29 @@ pub struct DecryptInfo {
     /// the ecdh key used for decrypting the request
     #[prost(bytes = "vec", tag = "1")]
     pub server_ecdh_key_id: ::prost::alloc::vec::Vec<u8>,
-    /// the client's ecdh pubkey for decrypting the request
-    #[prost(bytes = "vec", tag = "2")]
-    pub client_ecdh_pubkey: ::prost::alloc::vec::Vec<u8>,
     /// the `info` string for use in an HKDF for decrypting the request
     #[prost(bytes = "vec", tag = "3")]
     pub ecdh_info: ::prost::alloc::vec::Vec<u8>,
     /// the `salt` string for use in an HKDF for decrypting the request
     #[prost(bytes = "vec", tag = "4")]
     pub ecdh_salt: ::prost::alloc::vec::Vec<u8>,
+    /// the client's ecdh pubkey for decrypting the request. This can
+    /// be PEM encoded or DER encoded
+    #[prost(oneof = "decrypt_info::ClientEcdhPubkey", tags = "5, 6")]
+    pub client_ecdh_pubkey: ::core::option::Option<decrypt_info::ClientEcdhPubkey>,
+}
+/// Nested message and enum types in `DecryptInfo`.
+pub mod decrypt_info {
+    /// the client's ecdh pubkey for decrypting the request. This can
+    /// be PEM encoded or DER encoded
+    #[allow(clippy::derive_partial_eq_without_eq)]
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum ClientEcdhPubkey {
+        #[prost(string, tag = "5")]
+        Pem(::prost::alloc::string::String),
+        #[prost(bytes, tag = "6")]
+        Der(::prost::alloc::vec::Vec<u8>),
+    }
 }
 /// An API request to the Service.
 #[allow(clippy::derive_partial_eq_without_eq)]

@@ -2,6 +2,7 @@
 //! encrypted responses to encrypted requests using ECDH and ECDSA.
 
 use core::marker::PhantomData;
+use decrypt_info::ClientEcdhPubkey;
 use private_key_generator::{
     ecdsa::{
         hazmat::DigestPrimitive, signature::DigestSigner, EcdsaCurve, Signature, SignatureSize,
@@ -10,24 +11,28 @@ use private_key_generator::{
     elliptic_curve::{
         array::ArraySize,
         ops::Invert,
+        pkcs8::AssociatedOid,
         point::PointCompression,
         sec1::{FromEncodedPoint, ModulusSize, ToEncodedPoint},
         subtle::CtOption,
         AffinePoint, CurveArithmetic, FieldBytesSize, JwkParameters, PublicKey, Scalar,
     },
     error::IdCreationError,
-    hkdf::hmac::digest::{core_api::BlockSizeUser, Output as HashOutput},
+    hkdf::hmac::digest::core_api::BlockSizeUser,
     typenum::Unsigned,
     CryptoKeyGenerator, Digest, EncodedId,
 };
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    str::FromStr,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 #[cfg(feature = "zeroize")]
 use private_key_generator::Zeroize;
 
 use aead::{Aead, AeadCore, AeadInPlace, KeyInit};
 
-use rand_core::{CryptoRngCore, SeedableRng};
+use rand_core::{CryptoRng, SeedableRng};
 
 use base64::{
     alphabet::Alphabet,
@@ -40,7 +45,8 @@ pub use private_key_generator;
 pub mod utils;
 use utils::{b64_len_to_binary_len, padding_trail, StringSanitization};
 
-mod error;
+pub mod error;
+mod macros;
 pub mod prelude;
 mod request;
 mod response;
@@ -145,7 +151,7 @@ pub struct HttpPrivateKeyManager<
     FastRng,
 > where
     KeyGen: CryptoKeyGenerator,
-    Ecdh: CurveArithmetic + JwkParameters + PointCompression,
+    Ecdh: CurveArithmetic + JwkParameters + PointCompression + AssociatedOid,
     FieldBytesSize<Ecdh>: ModulusSize,
     AffinePoint<Ecdh>: FromEncodedPoint<Ecdh> + ToEncodedPoint<Ecdh>,
     EcdhKdfDigest: BlockSizeUser + Clone + Digest,
@@ -156,7 +162,7 @@ pub struct HttpPrivateKeyManager<
     ClientId: EncodedId,
     EcdhKeyId: EncodedId,
     EcdsaKeyId: EncodedId,
-    FastRng: CryptoRngCore + SeedableRng,
+    FastRng: CryptoRng + SeedableRng,
 {
     /// the key generator. You may use this directly if you need to.
     pub key_generator: KeyGen,
@@ -196,7 +202,7 @@ impl<KeyGen, Ecdh, EcdhKdf, Ecdsa, EcdsaDigest, CId, EcdhKId, EcdsaKId, FastRng>
     >
 where
     KeyGen: CryptoKeyGenerator,
-    Ecdh: CurveArithmetic + JwkParameters + PointCompression,
+    Ecdh: CurveArithmetic + JwkParameters + PointCompression + AssociatedOid,
     FieldBytesSize<Ecdh>: ModulusSize,
     AffinePoint<Ecdh>: FromEncodedPoint<Ecdh> + ToEncodedPoint<Ecdh>,
     EcdhKdf: BlockSizeUser + Clone + Digest,
@@ -207,7 +213,7 @@ where
     CId: EncodedId,
     EcdhKId: EncodedId,
     EcdsaKId: EncodedId,
-    FastRng: CryptoRngCore + SeedableRng,
+    FastRng: CryptoRng + SeedableRng,
 {
     /// Initializes this structure using your Key Generator.
     ///
@@ -390,8 +396,7 @@ where
         let binary_id = self
             .key_generator
             .validate_ecdsa_key_id::<C, IdType>(&decoded, associated_data)?;
-        let encoded = self.b64_engine.encode(binary_id.as_ref());
-        Ok(Id::new(&binary_id, encoded, associated_data))
+        Ok(Id::new(&binary_id, id.to_string(), associated_data))
     }
 
     /// Validates an ECDSA key id.
@@ -433,8 +438,7 @@ where
         let binary_id =
             self.key_generator
                 .validate_keyless_id::<IdType>(&decoded, id_type, associated_data)?;
-        let encoded = self.b64_engine.encode(binary_id.as_ref());
-        Ok(Id::new(&binary_id, encoded, associated_data))
+        Ok(Id::new(&binary_id, id.to_string(), associated_data))
     }
 
     /// Signs data with a signing key derived from a key ID.
@@ -532,15 +536,18 @@ where
         Hasher: Digest,
         DecryptedOutput: Message + Default,
     {
+        debug_log!("In decrypt_and_hash_request");
         self.is_handshake = is_handshake;
 
         // reject a request if the ClientID is longer than 2 times our ID length. If it
         // was originally encoded in base64, it wouldn't be much larger than 133% of the
         // length
         if request.client_id.len() > CId::IdLen::USIZE << 1 {
-            return Err(ProtocolError::InvalidRequest);
+            return Err(ProtocolError::InvalidRequest(
+                "Client ID is too long.".into(),
+            ));
         }
-
+        debug_log!("About to get decryptption_info");
         let decrypt_info = request
             .decryption_info
             .as_ref()
@@ -549,6 +556,7 @@ where
         // generate a new client ID if this is the first handshake; otherwise, update
         // self to contain the client ID
         if is_handshake {
+            debug_log!("Generating a client ID");
             let (decoded_prefix, truncate_len) =
                 self.decode_and_truncate_prefix::<CId>(&request.client_id);
 
@@ -560,14 +568,16 @@ where
                 &mut self.rng,
             )?;
         } else {
+            debug_log!("Validating a client ID");
             // validate the client's ID
-            self.client_id = self.key_generator.validate_keyless_id(
-                request.client_id.as_bytes(),
-                b"client ID",
-                None,
-            )?
+            self.client_id = self
+                .validate_keyless_id(&request.client_id, b"client ID", None)?
+                .binary_id
         }
 
+        let associated_data = self.client_id.as_ref();
+
+        debug_log!("Validing an ecdsa_key_id");
         // validate signing key ID. If we wanted to... we could associate the signing
         // key with a client. Not entirely sure how useful it would be, but it doesn't
         // cost anything to include the client's ID here during validation
@@ -575,31 +585,45 @@ where
             .key_generator
             .validate_ecdsa_key_id::<Ecdsa, EcdsaKId>(
                 request.server_ecdsa_key_id.as_slice(),
-                Some(self.client_id.as_ref()),
+                Some(associated_data),
             )?;
 
-        let associated_data = request.client_id.as_bytes();
-
+        debug_log!("Validating an ECDH Key ID");
         let ecdh_key_id = self.key_generator.validate_ecdh_key_id::<EcdhKId>(
             &decrypt_info.server_ecdh_key_id,
             Some(associated_data),
         )?;
 
-        let client_public_key =
-            PublicKey::<Ecdh>::from_sec1_bytes(&decrypt_info.client_ecdh_pubkey)?;
+        debug_log!("Setting client_public_key");
+        let client_public_key: PublicKey<Ecdh> = match &decrypt_info.client_ecdh_pubkey {
+            Some(value) => match value {
+                ClientEcdhPubkey::Pem(v) => PublicKey::<Ecdh>::from_str(v.as_str())?,
+                ClientEcdhPubkey::Der(v) => PublicKey::<Ecdh>::from_sec1_bytes(&v)?,
+            },
+            None => {
+                return Err(ProtocolError::InvalidRequest(
+                    "client_ecdh_pubkey must be set to either the PEM encoded public key or the \
+                     DER encoded public ECDH key."
+                        .into(),
+                ))
+            }
+        };
 
+        debug_log!("Getting the shared_secret");
         let shared_secret = self.key_generator.ecdh_using_key_id(
             &ecdh_key_id,
             Some(associated_data),
             client_public_key,
         );
 
+        debug_log!("Initialized KDF");
         let kdf = shared_secret.extract::<EcdhKdf>(Some(&decrypt_info.ecdh_salt));
 
-        if self.symmetric_key.capacity() < Aead::KeySize::USIZE {
-            self.symmetric_key = Vec::with_capacity(Aead::KeySize::USIZE);
+        if self.symmetric_key.len() != Aead::KeySize::USIZE {
+            self.symmetric_key = vec![0u8; Aead::KeySize::USIZE];
         }
 
+        debug_log!("Expanding symmetric key");
         kdf.expand(&decrypt_info.ecdh_info, &mut self.symmetric_key)
             .expect("Key size should be smaller than 256 bytes");
 
@@ -609,23 +633,30 @@ where
 
         let decryptor = Aead::new(key);
 
-        decryptor.decrypt_in_place_detached(
-            self.nonce.as_slice().try_into().unwrap(),
-            associated_data,
-            &mut request.data[Aead::NonceSize::USIZE..],
-            &aead::Tag::<Aead>::default(),
-        )?;
+        debug_log!("Decrypting payload");
 
+        #[allow(unused_mut)]
+        let mut decrypted = decryptor.decrypt(
+            self.nonce.as_slice().into(),
+            &request.data[Aead::NonceSize::USIZE..],
+        )?;
+        //let decrypt_result =
+        // decryptor.decrypt_in_place_detached(self.nonce.as_slice().try_into().
+        // unwrap(), associated_data, &mut
+        // request.data[Aead::NonceSize::USIZE..tag_index], &tag);
+
+        debug_log!("Initialized hasher");
         let hasher = Hasher::new_with_prefix(request_bytes);
 
-        let output = Ok((
-            DecryptedOutput::decode(&request.data[Aead::NonceSize::USIZE..])?,
-            hasher,
-        ));
+        debug_log!("Decoding decrypted_data");
+        let decoded = DecryptedOutput::decode_length_delimited(decrypted.as_slice())?;
+
+        let output = Ok((decoded, hasher));
 
         #[cfg(feature = "zeroize")]
-        request.data.zeroize();
+        decrypted.zeroize();
 
+        debug_log!("Returned result in decrypt_and_hash_request");
         output
     }
 
@@ -667,7 +698,8 @@ where
 
         let key = aead::Key::<Aead_>::from_slice(&self.symmetric_key);
 
-        let mut plaintext = response.encode_to_vec();
+        #[allow(unused_mut)]
+        let mut plaintext = response.encode_length_delimited_to_vec();
 
         // the server will be skipping a random nonce generation in favor of simply
         // using a different nonce. Because the client should pick different nonces for
@@ -707,6 +739,7 @@ where
         let next_key = EcdhKey {
             ecdh_key_id: key_id.as_ref().to_vec(),
             ecdh_public_key: pubkey.to_sec1_bytes().as_ref().to_vec(),
+            ecdh_public_key_pem: pubkey.to_string(),
         };
 
         let resp = Response {
@@ -726,7 +759,7 @@ where
             );
 
         let (signature, _): (Signature<Ecdsa>, _) = signer.try_sign_digest(
-            EcdsaDigest::new_with_prefix(resp.encode_to_vec().as_slice()),
+            EcdsaDigest::new_with_prefix(resp.encode_length_delimited_to_vec().as_slice()),
         )?;
 
         // reset state to prepare for the next request, if there is one
@@ -740,7 +773,7 @@ where
     /// yet. This is mainly used to prevent misuse.
     #[inline]
     fn has_decrypted_request(&self) -> bool {
-        self.symmetric_key.len().eq(&0)
+        self.symmetric_key.len().ne(&0)
     }
 
     /// Returns the client's ID in its Binary Encoding.
@@ -860,7 +893,7 @@ where
         self.rng.fill_bytes(&mut nonce);
         let encryptor = Aead_::new(&key);
         let mut encrypted = encryptor.encrypt(&nonce, data)?;
-        let mut prefix = [version].join(nonce.as_slice());
+        let mut prefix = [&version, nonce.as_slice()].concat();
         encrypted.splice(0..0, prefix.drain(..));
         Ok(encrypted)
     }
@@ -891,6 +924,7 @@ where
     where
         Aead_: AeadCore + KeyInit + Aead,
     {
+        debug_log!("In decrypt_resource()");
         let mut key = aead::Key::<Aead_>::default();
         self.key_generator.generate_resource_decryption_key(
             resource_id,
@@ -901,21 +935,192 @@ where
                 .expect("Tried decrypting a resource that was not encrypted correctly"),
             &mut key,
         );
+        debug_log!("Generated resource decryption key");
 
-        let nonce: &aead::Nonce<Aead_> = data[4..Aead_::NonceSize::USIZE].into();
+        let nonce: &aead::Nonce<Aead_> = data[4..4 + Aead_::NonceSize::USIZE].into();
 
         let decryptor = Aead_::new(&key);
-        let decrypted = decryptor.decrypt(&nonce, data)?;
+        let decrypted = decryptor.decrypt(&nonce, &data[4 + Aead_::NonceSize::USIZE..])?;
+        debug_log!("Decrypted the resource");
         Ok(decrypted)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+    use p384::{ecdh::EphemeralSecret, NistP384};
+    use private_key_generator::hkdf::hmac::Hmac;
+    use rand_core_previous::OsRng;
+
+    use crate::prelude::*;
+    use sha2::Sha384;
+
     use super::*;
 
+    type BigId = BinaryId<U48, U8, 6, use_timestamps::Sometimes>;
+    type EcdsaKeyId = BinaryId<U48, U10, 6, use_timestamps::Always>;
+
+    type TestVersionConfig =
+        VersioningConfig<0, { years_to_seconds(1) }, 32, 32, 8, { years_to_seconds(1) }>;
+    type TestKeyGen = KeyGenerator<Hmac<Sha384>, TestVersionConfig, ChaCha8Rng, Sha384>;
+    type TestKeyManager = HttpPrivateKeyManager<
+        TestKeyGen,
+        NistP384,
+        Sha384,
+        NistP384,
+        Sha384,
+        BigId,
+        BigId,
+        EcdsaKeyId,
+        ChaCha8Rng,
+    >;
+
+    fn init_key_manager() -> TestKeyManager {
+        TestKeyManager::from_key_generator(
+            TestKeyGen::new(&[32u8; 48], b"software licensor"),
+            Alphabet::new("qwertyuiopasdfghjklzxcvbnm1234567890QWERTYUIOPASDFGHJKLZXCVBNM/_")
+                .unwrap(),
+        )
+    }
+
     #[test]
-    fn decryption_and_decoding() {}
+    fn decryption_and_decoding() {
+        let mut server_key_manager = init_key_manager();
+        let server_ecdh_keys: (BigId, PublicKey<NistP384>) = server_key_manager
+            .generate_ecdh_pubkeys_and_ids(1, None)
+            .unwrap()[0]
+            .clone();
+
+        let (server_ecdsa_key_id, _server_ecdsa_key) = server_key_manager
+            .generate_ecdsa_key_and_id::<NistP384, EcdsaKeyId>(
+                "test",
+                Some(
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs()
+                        + years_to_seconds(1),
+                ),
+                None,
+            )
+            .unwrap();
+
+        let client_key = EphemeralSecret::random(&mut OsRng);
+
+        let ecdh_info = b"test_info".to_vec();
+        let ecdh_salt = b"test salt".to_vec();
+        let inner = Request {
+            symmetric_algorithm: "chacha20poly1305".into(),
+            client_id: "Handshake".into(),
+            data: Vec::new(),
+            decryption_info: Some(DecryptInfo {
+                server_ecdh_key_id: server_ecdh_keys.0.as_ref().to_vec(),
+                client_ecdh_pubkey: Some(ClientEcdhPubkey::Der(
+                    client_key.public_key().to_sec1_bytes().to_vec(),
+                )),
+                ecdh_info: ecdh_info.clone(),
+                ecdh_salt: ecdh_salt.clone(),
+            }),
+            server_ecdsa_key_id: server_ecdsa_key_id.binary_id.as_ref().to_vec(),
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        };
+        let mut outer = inner.clone();
+
+        let mut key = Key::default();
+        let shared_secret = client_key.diffie_hellman(&server_ecdh_keys.1);
+        let kdf = shared_secret.extract::<Sha384>(Some(ecdh_salt.as_slice()));
+        kdf.expand(ecdh_info.as_slice(), &mut key)
+            .expect("This key should be small enough");
+
+        let nonce = Nonce::default();
+        let encryptor = ChaCha20Poly1305::new(&key);
+        let mut encrypted_payload = encryptor
+            .encrypt(&nonce, inner.encode_length_delimited_to_vec().as_slice())
+            .unwrap();
+        encrypted_payload.splice(0..0, nonce);
+        assert_eq!(&encrypted_payload[..nonce.len()], &nonce.to_vec());
+        outer.data = encrypted_payload;
+
+        let outer_cloned = outer.clone();
+
+        // decrypt with function
+        let decrypt_output = server_key_manager
+            .decrypt_and_hash_request::<ChaCha20Poly1305, Sha384, Request>(
+                &mut outer,
+                &outer_cloned.encode_length_delimited_to_vec(),
+                true,
+            );
+
+        assert!(
+            decrypt_output.is_ok(),
+            "Encountered error: {}",
+            decrypt_output.unwrap_err().to_string()
+        );
+
+        let (inner, _hasher) = decrypt_output.unwrap();
+        assert_eq!(inner.client_id, "Handshake");
+    }
+
+    #[test]
+    fn ecdh_tests() {
+        let private_key = EphemeralSecret::random(&mut OsRng);
+        let mut server_key_manager = init_key_manager();
+        let server_ecdh_keys: (BigId, PublicKey<NistP384>) = server_key_manager
+            .generate_ecdh_pubkeys_and_ids(1, None)
+            .unwrap()[0]
+            .clone();
+        let shared_secret = private_key.diffie_hellman(&server_ecdh_keys.1);
+
+        let server_shared_secret = server_key_manager.key_generator.ecdh_using_key_id(
+            &server_ecdh_keys.0,
+            None,
+            private_key.public_key(),
+        );
+
+        assert_eq!(
+            &server_shared_secret.raw_secret_bytes(),
+            &shared_secret.raw_secret_bytes()
+        );
+
+        let ecdh_salt = b"fe";
+        let ecdh_info = b"ecdh info";
+        let client_kdf = shared_secret.extract::<Sha384>(Some(ecdh_salt));
+        let mut client_key = [0u8; 32];
+        client_kdf.expand(ecdh_info, &mut client_key).unwrap();
+
+        let server_kdf = server_shared_secret.extract::<Sha384>(Some(ecdh_salt));
+        let mut server_key = [0u8; 32];
+        server_kdf.expand(ecdh_info, &mut server_key).unwrap();
+
+        assert_eq!(server_key, client_key);
+    }
+
+    #[test]
+    fn resource_encryption_and_decryption_roundtrip() {
+        let data = b"test test test";
+        let test_resource_id = b"resource id";
+        let client_id = b"client ID";
+        let misc_info = b"misc info";
+        let mut key_manager = init_key_manager();
+        let encrypted = key_manager
+            .encrypt_resource::<ChaCha20Poly1305>(data, test_resource_id, client_id, misc_info)
+            .unwrap();
+
+        let decrypted = key_manager
+            .decrypt_resource::<ChaCha20Poly1305>(
+                encrypted.as_slice(),
+                test_resource_id,
+                client_id,
+                misc_info,
+            )
+            .unwrap();
+
+        assert_eq!(data, decrypted.as_slice());
+    }
 
     #[test]
     #[cfg(feature = "zeroize")]
@@ -936,5 +1141,126 @@ mod tests {
         assert_eq!(vec.capacity(), 32);
 
         assert_eq!(vec.len(), 0);
+    }
+
+    #[test]
+    fn generation_and_validation() {
+        let mut key_manager = init_key_manager();
+        let ecdsa_key = key_manager
+            .generate_ecdsa_key_and_id::<NistP384, BigId>("", None, None)
+            .unwrap();
+        let bytes = ecdsa_key.0.binary_id;
+        let result = key_manager
+            .key_generator
+            .validate_ecdsa_key_id::<NistP384, BigId>(
+                bytes.as_ref(),
+                Some(b"this should not affect the validation"),
+            );
+        assert!(result.is_ok())
+    }
+
+    /// Initializes a generic key manager with a generic key generator.
+    macro_rules! init_generic_key_manager {
+        ($key_manager:ty, $key_generator:ty) => {
+            <$key_manager>::from_key_generator(
+                <$key_generator>::new(&[32u8; 48], b"software licensor"),
+                Alphabet::new("qwertyuiopasdfghjklzxcvbnm1234567890QWERTYUIOPASDFGHJKLZXCVBNM/_")
+                    .unwrap(),
+            )
+        };
+    }
+
+    /// This test should ensure that resource decryption is possible after
+    /// different versions pass. I will accomplish this using different
+    /// Version Configs that have different epochs.
+    #[test]
+    fn db_decryption_with_different_versions() {
+        type TemplateVersionConfig<const EPOCH: u64> = VersioningConfig<
+            EPOCH,
+            { years_to_seconds(5) }, // version lifetime
+            32,                      // version bits
+            32,                      // timestamp bits
+            8,                       // timestamp precision loss
+            { years_to_seconds(1) }, // max expiration time
+        >;
+
+        type OldVersionConfig = TemplateVersionConfig<0>;
+        type NewVersionConfig = TemplateVersionConfig<1719159990>; // june 23, 2024
+        type KeyGeneratorTemplate<VersionConfig> =
+            KeyGenerator<Hmac<Sha384>, VersionConfig, ChaCha8Rng, Sha384>;
+
+        type OldKeyGenerator = KeyGeneratorTemplate<OldVersionConfig>;
+        type NewKeyGenerator = KeyGeneratorTemplate<NewVersionConfig>;
+
+        type KeyManagerTemplate<KeyGeneratorTemp> = HttpPrivateKeyManager<
+            KeyGeneratorTemp,
+            NistP384,
+            Sha384,
+            NistP384,
+            Sha384,
+            BigId,
+            BigId,
+            BigId,
+            ChaCha8Rng,
+        >;
+
+        let mut old_key_manager =
+            init_generic_key_manager!(KeyManagerTemplate<OldKeyGenerator>, OldKeyGenerator);
+
+        let data = [5u8; 256];
+        let resource_id = [1, 1, 2, 3, 5, 8, 13, 21];
+        let client_id = [1, 2, 3, 4, 5, 6];
+        let encrypted = old_key_manager
+            .encrypt_resource::<ChaCha20Poly1305>(&data, &resource_id, &client_id, &[])
+            .unwrap();
+
+        assert_ne!(&encrypted, &data);
+
+        let mut new_key_manager =
+            init_generic_key_manager!(KeyManagerTemplate<NewKeyGenerator>, NewKeyGenerator);
+
+        let decrypted = new_key_manager
+            .decrypt_resource::<ChaCha20Poly1305>(&encrypted, &resource_id, &client_id, &[])
+            .unwrap();
+
+        assert_eq!(&data, &decrypted.as_slice());
+    }
+
+    #[test]
+    fn associated_ecdh_keys() {
+        let mut key_manager = init_key_manager();
+
+        let client_id = key_manager
+            .generate_keyless_id::<BigId>("", b"test", None, None)
+            .unwrap();
+
+        let associated_data = client_id.binary_id.as_ref();
+
+        let (generated_ecdh_key_id, generated_ecdh_pubkey) = key_manager
+            .key_generator
+            .generate_ecdh_pubkey_and_id::<NistP384, BigId>(
+                &[],
+                None,
+                Some(associated_data),
+                &mut key_manager.rng,
+            )
+            .unwrap();
+
+        let client_ecdh_key = EphemeralSecret::random(&mut OsRng);
+
+        let initial_shared_secret = client_ecdh_key.diffie_hellman(&generated_ecdh_pubkey);
+
+        let second_shared_secret = key_manager
+            .key_generator
+            .ecdh_using_key_id::<NistP384, BigId>(
+                &generated_ecdh_key_id,
+                Some(associated_data),
+                client_ecdh_key.public_key(),
+            );
+
+        assert_eq!(
+            initial_shared_secret.raw_secret_bytes(),
+            second_shared_secret.raw_secret_bytes()
+        );
     }
 }

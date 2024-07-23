@@ -249,7 +249,7 @@ pub fn extract_ints_from_slice<const NUMS: usize>(
 mod tests {
     use super::*;
     use rand::rngs::OsRng;
-    use rand_core::RngCore;
+    use rand::RngCore;
     use std::format;
     use std::string::String;
 
