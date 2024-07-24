@@ -10,11 +10,13 @@ license = "MIT OR Apache-2.0"
 aead = { version = "0.5", features = ["alloc"] }
 #aead = { version = "0.6.0-pre.0", features = ["alloc"] }
 base64 = "0.22.0"
-elliptic-curve = { version = "0.14.0-pre.5", features = ["ecdh", "jwk", "pem", "pkcs8"] }
 private_key_generator = { path = "../private_key_generator" }
-prost = "0.12.3"
+prost = "0.13.1"
 rand_core = { version = "0.9.0-alpha.1", features = ["getrandom"]}
 tracing = { version = "0.1.40", optional = true }
+
+[build-dependencies]
+prost-build = { version = "0.13.1", optional = true }
 
 [dev-dependencies]
 chacha20poly1305 = "0.10"
@@ -23,5 +25,8 @@ rand_core_previous = { version = "0.6", features = ["getrandom"], package = "ran
 sha2 = "0.11.0-pre.3"
 
 [features]
+default = ["server_client_ecdh_ecdsa_mode"]
+server_client_ecdh_ecdsa_mode = []
+single_party_mode = []
 logging = ["tracing"]
 zeroize = ["private_key_generator/zeroize"]

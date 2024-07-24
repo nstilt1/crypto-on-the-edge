@@ -1,10 +1,10 @@
 syntax = "proto3";
 
-package request;
+package server_client_ecdh_ecdsa_mode;
 
 // Some information that is necessary to decrypt the request
 message DecryptInfo {
-    // the ecdh key used for decrypting the request
+    // the ecdh key used for the server to decrypt the request
     bytes server_ecdh_key_id = 1;
 
     // the client's ecdh pubkey for decrypting the request. This can 
@@ -32,7 +32,8 @@ message Request {
     // this is the initial handshake or not
     string client_id = 2;
 
-    // Encrypted payload with the nonce prefixed to the encrypted data
+    // Encrypted payload with the nonce prefixed to the encrypted data, and the
+    // tag postfixed to the encrypted data.
     bytes data = 3;
 
     // Information to decrypt the request
@@ -40,6 +41,32 @@ message Request {
 
     // The ECDSA key ID that the server will use to sign its response
     bytes server_ecdsa_key_id = 5;
+
+    // the timestamp, in seconds since UNIX_EPOCH
+    uint64 timestamp = 6;
+}
+
+// Some ecdh key information
+message EcdhKey {
+    bytes ecdh_key_id = 1;
+    bytes ecdh_public_key = 2;
+    string ecdh_public_key_pem = 3;
+}
+
+// An API response from the service.
+//
+// To decrypt `data`, you will need to use the same symmetric encryption key
+// that was used to encrypt it. The nonce will be different.
+// 
+// There will be a signature stored in the `Signature` header, which is 
+// computed from a hash of this encoded structure.
+message Response {
+    // Encrypted payload with the nonce prefixed to the encrypted data
+    bytes data = 2;
+
+    // The protobuf-encoded key information for the client to use for their next 
+    // request
+    EcdhKey next_ecdh_key = 5;
 
     // the timestamp, in seconds since UNIX_EPOCH
     uint64 timestamp = 6;

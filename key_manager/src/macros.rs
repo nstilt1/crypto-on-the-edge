@@ -58,7 +58,7 @@ macro_rules! debug_log {
 /// ) -> Result<CreateLicenseResponse, ApiError> {
 ///     
 /// ```
-#[macro_export]
+#[cfg_attr(feature = "server_client_ecdh_ecdsa_mode", macro_export)]
 macro_rules! impl_handle_crypto {
     ($request_type:ty, $response_type:ty, $error_type:ty, $hash_function:ty, $signature_type:ty, $(($symmetric_alg_name:expr, $symmetric_alg:ty)),*) => {
         /// This function uses a match statement to select a symmetric encryption algorithm, then it:
