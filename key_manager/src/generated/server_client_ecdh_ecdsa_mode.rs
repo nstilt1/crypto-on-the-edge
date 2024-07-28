@@ -81,8 +81,8 @@ pub struct Response {
     /// Encrypted payload with the nonce prefixed to the encrypted data
     #[prost(bytes = "vec", tag = "2")]
     pub data: ::prost::alloc::vec::Vec<u8>,
-    /// The protobuf-encoded key information for the client to use for their next
-    /// request
+    /// The protobuf-encoded key information for the client to use for their
+    /// next request
     #[prost(message, optional, tag = "5")]
     pub next_ecdh_key: ::core::option::Option<EcdhKey>,
     /// the timestamp, in seconds since UNIX_EPOCH
