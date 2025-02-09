@@ -415,13 +415,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "init_boxed"
-version = "0.1.0"
-dependencies = [
- "zeroize",
-]
-
-[[package]]
 name = "inout"
 version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

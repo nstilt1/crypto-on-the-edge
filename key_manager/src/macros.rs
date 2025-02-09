@@ -11,10 +11,10 @@ macro_rules! error_log {
 
 #[macro_export]
 macro_rules! debug_log {
-    ($str:expr) => {
+    ($($arg:tt)*) => {{
         #[cfg(feature = "logging")]
-        tracing::debug!($str)
-    };
+        tracing::debug!($($arg)*)
+    }};
 }
 
 /// Defines a `handle_crypto` function that selects a symmetric encryption

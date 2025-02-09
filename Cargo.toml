@@ -1,7 +1,6 @@
 [workspace]
 members = [ 
     "example", 
-    "init_boxed",
     "key_manager", 
     "key_manager_docs",
     "private_key_generator",
