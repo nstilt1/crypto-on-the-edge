@@ -6,3 +6,4 @@ pub use crate::{
 };
 
 pub use private_key_generator::prelude::*;
+pub use base64::alphabet::Alphabet;
