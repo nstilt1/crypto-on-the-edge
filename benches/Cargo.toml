@@ -1,0 +1,22 @@
+[package]
+name = "benches"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+aes-gcm = { version = "0.10" }
+chacha20poly1305 = "0.10"
+http_private_key_manager = { path = "../key_manager", features = ["zeroize"] }
+p384 = { git = "https://github.com/RustCrypto/elliptic-curves.git", branch = "master", package = "p384", version = "0.14.0-pre", features = ["jwk", "ecdsa", "pem"]  }
+sha2 = { version = "0.11.0-pre.3" }
+sha3 = { version = "0.11.0-pre.3", features = ["asm"]}
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "key_manager"
+path = "src/key_manager.rs"
+harness = false

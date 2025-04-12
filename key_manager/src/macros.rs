@@ -11,10 +11,10 @@ macro_rules! error_log {
 
 #[macro_export]
 macro_rules! debug_log {
-    ($str:expr) => {
+    ($($arg:tt)*) => {{
         #[cfg(feature = "logging")]
-        tracing::debug!($str)
-    };
+        tracing::debug!($($arg)*)
+    }};
 }
 
 /// Defines a `handle_crypto` function that selects a symmetric encryption
@@ -72,8 +72,8 @@ macro_rules! impl_handle_crypto {
             request_bytes: &[u8],
             is_handshake: bool,
             signature: Vec<u8>
-        ) -> Result<($crate::Response, $signature_type), ApiError> {
-            let mut request = $crate::Request::decode_length_delimited(request_bytes)?;
+        ) -> Result<($crate::generated::Response, $signature_type), ApiError> {
+            let mut request = $crate::generated::Request::decode_length_delimited(request_bytes)?;
             let chosen_symmetric_algorithm = request.symmetric_algorithm.to_lowercase();
             match chosen_symmetric_algorithm.as_str() {
                 $(

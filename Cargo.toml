@@ -1,10 +1,10 @@
 [workspace]
 members = [ 
     "example", 
-    "init_boxed",
     "key_manager", 
     "key_manager_docs",
     "private_key_generator",
     "private_key_generator_docs",
-    "zero_stack"
+    "zero_stack",
+    "benches"
 ]

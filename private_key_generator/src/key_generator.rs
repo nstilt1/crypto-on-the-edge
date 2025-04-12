@@ -942,8 +942,7 @@ where
         if id.uses_associated_data() {
             // TODO: ensure that the compiler doesn't optimize this by checking the if
             // statement before validating the HMAC?
-            hmac_validation =
-                self.validate_hmac(&id, b"ecdsa", self.current_version, associated_data);
+            hmac_validation = self.validate_hmac(&id, b"ecdsa", version, associated_data);
             if associated_data.as_ref().is_none() {
                 return Err(InvalidId::IdExpectedAssociatedData);
             }
@@ -1259,6 +1258,9 @@ mod tests {
 
     const MAX_PREFIX_LEN: usize = 6;
 
+    /// An epoch used for testing; January 1st, 2016
+    const TEST_EPOCH: u64 = 1451678805;
+
     type TestVersionConfig = AnnualVersionConfig<4, 8, 24>;
     type TestId = BinaryId<U48, U5, MAX_PREFIX_LEN, use_timestamps::Sometimes>;
     type KG<VersionConfiguration> =
@@ -1374,18 +1376,20 @@ mod tests {
     /// Some validation tests
     mod validation {
 
+        use std::time::{SystemTime, UNIX_EPOCH};
+
         use chacha20::ChaCha8Rng;
-        use elliptic_curve::consts::{U48, U5};
+        use elliptic_curve::consts::{U48, U5, U8};
         use rand::rngs::OsRng;
 
         use crate::{
-            id::timestamp_policies::use_timestamps, key_generator::StaticVersionConfig, BinaryId,
-            KeyGenerator,
+            id::timestamp_policies::use_timestamps, key_generator::StaticVersionConfig,
+            timestamp_policies, utils::days_to_seconds, BinaryId, KeyGenerator, VersioningConfig,
         };
 
         use super::{
-            CryptoKeyGenerator, Hmac, InvalidId, SeedableRng, Sha256, Sha2KeyGenerator, StdRng,
-            TestId, TEST_HMAC_KEY, TEST_ID_TYPE,
+            years_to_seconds, CryptoKeyGenerator, Hmac, InvalidId, SeedableRng, Sha256,
+            Sha2KeyGenerator, StdRng, TestId, TEST_EPOCH, TEST_HMAC_KEY, TEST_ID_TYPE,
         };
 
         #[test]
@@ -1526,6 +1530,54 @@ mod tests {
                 }
                 tampered_id.as_mut()[i] = tampered_id.as_ref()[i].wrapping_add(1)
             }
+        }
+
+        /// This test might reveal a bug if the version in an ID is greater than
+        /// the current version. It should be acceptable as long as the
+        /// timestamp is within range of [NOW, NOW +
+        /// maximum_expiration_time_difference]
+        #[test]
+        fn timestamp_with_future_version() {
+            type Config = VersioningConfig<
+                TEST_EPOCH,
+                { days_to_seconds(60) }, // VERSION LIFETIME
+                32,                      // VERSION BITS
+                32,                      // TIMESTAMP BITS
+                0,                       // TIMESTAMP PRECISION LOSS
+                { years_to_seconds(1) }, // MAX EXPIRATION TIME
+            >;
+            type KeyGen = KeyGenerator<Hmac<Sha256>, Config, ChaCha8Rng, Sha256>;
+            type TestId = BinaryId<U48, U8, 8, timestamp_policies::use_timestamps::Always>;
+            const TEST_ID_TYPE: &[u8] = b"test";
+            let expiration_time = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                + years_to_seconds(1);
+
+            let (_prk, mut keygen) = KeyGen::extract(&[3u8; 32], b"test");
+            let expiring_id: TestId = keygen
+                .generate_keyless_id(&[], TEST_ID_TYPE, Some(expiration_time), None, &mut OsRng)
+                .unwrap();
+
+            let validation: Result<TestId, InvalidId> =
+                keygen.validate_keyless_id(expiring_id.as_ref(), TEST_ID_TYPE, None);
+
+            assert!(
+                validation.is_ok(),
+                "Test ID validation failed. Version check did not allow for the high version"
+            );
+
+            let id = validation.unwrap();
+            let (_v, timestamp) = keygen.decode_version_and_timestamp_from_id(&id);
+            assert!(timestamp.is_some());
+            let t = timestamp.unwrap();
+            let timestamp_difference = (t as i128 - expiration_time as i128).abs();
+            assert!(
+                timestamp_difference <= 1,
+                "timestamp was off by {} seconds",
+                timestamp_difference
+            );
         }
     }
 
