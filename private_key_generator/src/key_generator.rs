@@ -942,8 +942,7 @@ where
         if id.uses_associated_data() {
             // TODO: ensure that the compiler doesn't optimize this by checking the if
             // statement before validating the HMAC?
-            hmac_validation =
-                self.validate_hmac(&id, b"ecdsa", self.current_version, associated_data);
+            hmac_validation = self.validate_hmac(&id, b"ecdsa", version, associated_data);
             if associated_data.as_ref().is_none() {
                 return Err(InvalidId::IdExpectedAssociatedData);
             }
