@@ -1,0 +1,31 @@
+[package]
+name = "stack_sanitizer"
+version = "0.1.0"
+description = """
+Securely santize the stack with a simple function built on
+the Portable Stack Manipulation (psm) crate and zeroize crate.
+"""
+authors = ["Noah Stiltner"]
+license = "Apache-2.0 OR MIT"
+readme = "README.md"
+categories = ["cryptography", "memory-management", "std", "os"]
+keywords = ["memory", "memset", "secure", "volatile", "zero", "stack"]
+edition = "2024"
+rust-version = "1.85"
+
+[dependencies]
+libc = "0.2.156"
+psm = "0.1.28"
+zeroize = { version = "1.0" }
+
+[dev-dependencies]
+chacha20 = { version = "0.10.0-rc.2", features = ["rng"], default-features = false}
+aead = { version = "0.5", features = ["alloc"] }
+hkdf = "0.12"
+sha3 = "0.10"
+
+[features]
+
+
+[package.metadata.docs.rs]
+all-features = true
