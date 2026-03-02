@@ -100,11 +100,11 @@ pub trait EncodedId:
     /// using the provided associated data.
     fn uses_associated_data(&self) -> bool;
 }
-
+use std::fmt::Debug;
 #[cfg(feature = "zeroize")]
-pub trait SeedBounds: Default + Zeroize + AsMut<[u8]> {}
+pub trait SeedBounds: Default + Zeroize + AsMut<[u8]> + Debug + Eq {}
 #[cfg(not(feature = "zeroize"))]
-pub trait SeedBounds: Default + AsMut<[u8]> {}
+pub trait SeedBounds: Default + AsMut<[u8]> + Debug + Eq {}
 
 impl SeedBounds for [u8; 32] {}
 /// The methods for RNGs allowed for generating version nonces/salts.

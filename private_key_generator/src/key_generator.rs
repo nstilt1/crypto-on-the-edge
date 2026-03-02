@@ -36,15 +36,20 @@ use subtle::{ConstantTimeEq, CtOption};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use core::marker::PhantomData;
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", not(test)))]
 use std::{
     format,
     string::String,
     time::{SystemTime, UNIX_EPOCH},
 };
+#[cfg(all(feature = "std", test))]
+use std::{format, string::String};
+#[cfg(all(feature = "std", test))]
+use mock_instant::thread_local::{SystemTime, UNIX_EPOCH, MockClock};
 
 use crate::traits::EncodedId;
 use crate::typenum::Unsigned;
+use crate::debug_log;
 
 /// A convenience type if you wish to use a hash function that does not
 /// implement `EagerHash`.
@@ -476,11 +481,16 @@ where
     fn get_current_version() -> u32 {
         #[cfg(feature = "std")]
         {
-            let diff = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs()
-                - V::EPOCH;
+            let now = SystemTime::now();
+            let d = now.duration_since(UNIX_EPOCH).unwrap();
+            let s = d.as_secs();
+            debug_assert!(
+                s >= V::EPOCH,
+                "Current time is before the versioning epoch, which may cause issues with ID generation. Current time: {}, Versioning epoch: {}",
+                s,
+                V::EPOCH
+            );
+            let diff = s - V::EPOCH;
             (diff / V::VERSION_LIFETIME) as u32
         }
         #[cfg(not(feature = "std"))]
@@ -578,8 +588,10 @@ where
         if self.current_version != version {
             let mut salt: Output<M> = Default::default();
             self.rng.get_version_mac_salt(version, &mut salt);
+            debug_log!("Using non-current version salt for HMAC generation");
             Mac::update(&mut self.mac, &salt);
         } else {
+            debug_log!("Using current version salt for HMAC generation");
             Mac::update(&mut self.mac, &self.current_version_mac_salt);
         }
         self.mac.finalize_fixed_reset()
@@ -604,6 +616,9 @@ where
         {
             Ok(())
         } else {
+            debug_log!("InvalidId::BadHMAC");
+            debug_log!("Expected HMAC: {:02x?}", &hmac[..Id::MAC_LENGTH]);
+            debug_log!("Actual HMAC: {:02x?}", &id.as_ref()[Id::MAC_START_INDEX..]);
             Err(InvalidId::BadHMAC)
         }
     }
@@ -655,6 +670,7 @@ where
             .expand(b"lvl 2 rng", &mut R::set_seed(&mut rng_seed))
             .expect("seed should be small enough");
 
+        debug_assert_ne!(rng_seed, Default::default());
         let hkdf =
             Hkdf::<HkdfDigest, I>::from_prk(&kdf_prk).expect("This key should be long enough");
         let mac = M::new_from_slice(&mac_key).expect("This key should be the correct length");
@@ -934,29 +950,35 @@ where
         let id: Id = id.try_into()?;
 
         let (version, expiration) = self.decode_version_and_timestamp_from_id(&id);
+        debug_log!("Decoded version: {}", version);
 
         // when ids are the same length, validate the HMAC first, then attempt to return
         // the more descriptive error before the invalid HMAC error
         let hmac_validation: Result<(), InvalidId>;
 
         if id.uses_associated_data() {
+            debug_log!("ID uses associated data, validating HMAC with associated data");
             // TODO: ensure that the compiler doesn't optimize this by checking the if
             // statement before validating the HMAC?
             hmac_validation = self.validate_hmac(&id, b"ecdsa", version, associated_data);
             if associated_data.as_ref().is_none() {
+                debug_log!("InvalidId::IdExpectedAssociatedData");
                 return Err(InvalidId::IdExpectedAssociatedData);
             }
         } else {
-            hmac_validation = self.validate_hmac(&id, b"ecdsa", self.current_version, None);
+            debug_log!("ID does not use associated data, validating HMAC without associated data");
+            hmac_validation = self.validate_hmac(&id, b"ecdsa", version, None);
         }
 
         hmac_validation?;
 
         if Id::TIMESTAMP_POLICY.eq(&use_timestamps::Always::U8) {
             if version > self.current_version {
+                debug_log!("InvalidId::VersionTooLarge");
                 return Err(InvalidId::VersionTooLarge);
             }
             if version < V::get_minimum_accepted_key_id_version(self.current_version) {
+                debug_log!("InvalidId::VersionOutOfDate");
                 return Err(InvalidId::VersionOutOfDate);
             }
         }
@@ -1253,6 +1275,7 @@ mod tests {
     use rand::rngs::StdRng;
     use rand::SeedableRng;
     use sha2::Sha256;
+    use std::time::Duration;
 
     use super::*;
 
@@ -1280,7 +1303,12 @@ mod tests {
 
     macro_rules! init_keygenerator {
         () => {
-            Sha2KeyGenerator::new(&TEST_HMAC_KEY, &[])
+            {
+                use super::*;
+                MockClock::advance(Duration::from_secs(TEST_EPOCH + 1000000));
+
+                Sha2KeyGenerator::new(&TEST_HMAC_KEY, &[])
+            }
         };
     }
 
@@ -1292,7 +1320,7 @@ mod tests {
 
     mod encoding_and_decoding {
         use super::*;
-        use std::time::{SystemTime, UNIX_EPOCH};
+        //use std::time::{SystemTime, UNIX_EPOCH};
 
         /// Ensures that the decoded expiration times are between
         ///
@@ -1304,6 +1332,8 @@ mod tests {
         fn fuzz_expiration_times() {
             macro_rules! test_id_with_loss_factor {
                 ($($precision_reduction:literal), *) => {
+                    MockClock::advance(Duration::from_secs(TEST_EPOCH + 1000000));
+
                     $(
                         let mut key_generator = init_keygenerator_with_versioning!(VersioningConfig<0, 1_000_000_000, 32, 32, $precision_reduction, 1_000_000_000>);
 
@@ -1346,7 +1376,8 @@ mod tests {
         /// current time.
         #[test]
         fn versions() {
-            const EPOCH: u64 = 0;
+            MockClock::advance_system_time(Duration::from_secs(TEST_EPOCH + 1000000));
+            const EPOCH: u64 = 10000;
             const VERSION_LIFETIME: u64 = 900_000;
             const MAX_EXPIRATION_TIME: u64 = 30_000;
             type VersionConfig =
@@ -1376,8 +1407,8 @@ mod tests {
     /// Some validation tests
     mod validation {
 
-        use std::time::{SystemTime, UNIX_EPOCH};
-
+        use mock_instant::thread_local::{SystemTime, UNIX_EPOCH, MockClock};
+        use std::time::Duration;
         use chacha20::ChaCha8Rng;
         use elliptic_curve::consts::{U48, U5, U8};
         use rand::rngs::OsRng;
@@ -1394,6 +1425,7 @@ mod tests {
 
         #[test]
         fn zero_sized_version_and_timestamp() {
+            MockClock::advance_system_time(Duration::from_secs(1_711_039_489 + 1000));
             type StaticVersioning = StaticVersionConfig<0, 0>;
             let mut key_generator =
                 KeyGenerator::<Hmac<Sha256>, StaticVersioning, ChaCha8Rng, Sha256>::new(
@@ -1413,6 +1445,7 @@ mod tests {
 
         #[test]
         fn keyless_id_with_associated_data() {
+            MockClock::advance_system_time(Duration::from_secs(1_711_039_489 + 1000));
             let mut key_generator = init_keygenerator!();
 
             let original_associated_data = b"providing additional data for the id generation requires providing the same data during validation. This is useful for when only a specific client should be using a specific Key ID, and it also affects the actual value of the private key associated with Key IDs (although that aspect does not apply to keyless IDs).";
@@ -1462,6 +1495,7 @@ mod tests {
 
         #[test]
         fn keyless_id_without_associated_data() {
+            MockClock::advance_system_time(Duration::from_secs(1_711_039_489 + 1000));
             let mut key_generator = init_keygenerator!();
 
             let id_without_associated_data = key_generator
@@ -1477,6 +1511,7 @@ mod tests {
 
         #[test]
         fn different_keyless_id_types() {
+            MockClock::advance_system_time(Duration::from_secs(1_711_039_489 + 1000));
             let mut key_generator = init_keygenerator!();
 
             let id_type_1 = key_generator
@@ -1498,6 +1533,8 @@ mod tests {
 
         #[test]
         fn basic_hmac_checks() {
+            // TODO: this test does not work beyond the first epoch (0)
+            MockClock::advance_system_time(Duration::from_secs(1_711_039_489 + 1000));
             let mut key_generator = init_keygenerator!();
 
             let id = key_generator
@@ -1538,6 +1575,7 @@ mod tests {
         /// maximum_expiration_time_difference]
         #[test]
         fn timestamp_with_future_version() {
+            MockClock::advance_system_time(Duration::from_secs(TEST_EPOCH + 1));
             type Config = VersioningConfig<
                 TEST_EPOCH,
                 { days_to_seconds(60) }, // VERSION LIFETIME
@@ -1583,6 +1621,7 @@ mod tests {
 
     #[test]
     fn truncated_prefix() {
+        MockClock::advance_system_time(Duration::from_secs(TEST_EPOCH + 1000000000));
         let mut key_generator = init_keygenerator!();
 
         let test_prefix = [1, 2, 3, 4, 5, 6, 7, 8, 9];
@@ -1608,6 +1647,7 @@ mod tests {
 
     #[test]
     fn ecdh_key_generation_and_regeneration() {
+        MockClock::advance_system_time(Duration::from_secs(TEST_EPOCH + 1000000000));
         let key_generator = init_keygenerator!();
 
         let mut aes_key = [0u8; 32];
@@ -1622,6 +1662,7 @@ mod tests {
 
     #[test]
     fn resource_encryption_key_regeneration() {
+        MockClock::advance_system_time(Duration::from_secs(TEST_EPOCH + 1000000000));
         let key_generator = init_keygenerator!();
         let mut aes_key = [0u8; 32];
         key_generator.generate_resource_encryption_key(
@@ -1750,6 +1791,152 @@ mod tests {
             assert_eq!(
                 shouldnt_have_expiration_time.unwrap_err(),
                 IdCreationError::IdShouldNotHaveExpirationTime
+            );
+        }
+    }
+
+    mod latent_bug_search {
+        use super::*;
+        use p384::NistP384;
+        use crate::prelude::U8;
+
+        type TestVersionConfig = VersioningConfig<
+            TEST_EPOCH,
+            600, // version lifetime
+            32, // version bits
+            32, // timestamp bits,
+            8, // timestamp precision loss
+            { years_to_seconds(1) }, // max expiration time
+        >;
+        type KeyGen = KeyGenerator<Hmac<Sha256>, TestVersionConfig, ChaCha8Rng, Sha256>;
+        type TestId = BinaryId<U48, U8, 8, use_timestamps::Sometimes>;
+        const TEST_ID_TYPE: &[u8] = b"test";
+
+        #[test]
+        fn catch_all() {
+            MockClock::advance_system_time(Duration::from_secs(TEST_EPOCH + 71));
+            let mut key_generator = KeyGen::new(&TEST_HMAC_KEY, b"");
+            let keyless_id = key_generator
+                .generate_keyless_id::<TestId>(&[], TEST_ID_TYPE, None, None, &mut rng!())
+                .unwrap();
+
+            let ecdh_key_id = key_generator
+                .generate_ecdh_pubkey_and_id::<NistP384, TestId>(
+                    &[],
+                    None,
+                    None,
+                    &mut rng!(),
+                )
+                .unwrap()
+                .0;
+
+            let ecdsa_key_id = key_generator
+                .generate_ecdsa_key_and_id::<NistP384, TestId>(&[], None, None, &mut rng!())
+                .unwrap()
+                .0;
+
+            // generate IDs with associated data
+            let associated_data = b"some associated data";
+            let keyless_id_with_data = key_generator
+                .generate_keyless_id::<TestId>(&[], TEST_ID_TYPE, None, Some(associated_data), &mut rng!())
+                .unwrap();
+            let ecdh_key_id_with_data = key_generator
+                .generate_ecdh_pubkey_and_id::<NistP384, TestId>(&[], None, Some(associated_data), &mut rng!())
+                .unwrap()
+                .0;
+            let ecdsa_key_id_with_data = key_generator
+                .generate_ecdsa_key_and_id::<NistP384, TestId>(&[], None, Some(associated_data), &mut rng!())
+                .unwrap()
+                .0;
+
+            // validate with same epoch
+            assert_eq!(
+                key_generator.validate_keyless_id::<TestId>(keyless_id.as_ref(), TEST_ID_TYPE, None).is_ok(),
+                true
+            );
+            assert_eq!(
+                key_generator.validate_ecdh_key_id::<TestId>(ecdh_key_id.as_ref(), None).is_ok(),
+                true
+            );
+            assert_eq!(
+                key_generator.validate_ecdsa_key_id::<NistP384, TestId>(ecdsa_key_id.as_ref(), None).is_ok(),
+                true
+            );
+            assert_eq!(
+                key_generator.validate_keyless_id::<TestId>(keyless_id_with_data.as_ref(), TEST_ID_TYPE, Some(associated_data)).is_ok(),
+                true
+            );
+            assert_eq!(
+                key_generator.validate_ecdh_key_id::<TestId>(ecdh_key_id_with_data.as_ref(), Some(associated_data)).is_ok(),
+                true
+            );
+            assert_eq!(
+                key_generator.validate_ecdsa_key_id::<NistP384, TestId>(ecdsa_key_id_with_data.as_ref(), Some(associated_data)).is_ok(),
+                true
+            );
+
+            // validate with future epoch
+            MockClock::advance_system_time(Duration::from_secs(1300));
+            key_generator = KeyGen::new(&TEST_HMAC_KEY, b"");
+            assert_eq!(key_generator.current_version, 2);
+            let (decoded_version, _) = key_generator.decode_version_and_timestamp_from_id(&keyless_id);
+            assert_eq!(decoded_version, 0);
+            assert_eq!(
+                key_generator.validate_keyless_id::<TestId>(keyless_id.as_ref(), TEST_ID_TYPE, None).is_ok(),
+                true
+            );
+            let (decoded_version, _) = key_generator.decode_version_and_timestamp_from_id(&ecdh_key_id);
+            assert_eq!(decoded_version, 0);
+            assert_eq!(
+                key_generator.validate_ecdh_key_id::<TestId>(ecdh_key_id.as_ref(), None).is_ok(),
+                true
+            );
+            let (decoded_version, _) = key_generator.decode_version_and_timestamp_from_id(&ecdsa_key_id);
+            assert_eq!(decoded_version, 0);
+            assert_eq!(
+                key_generator.validate_ecdsa_key_id::<NistP384, TestId>(ecdsa_key_id.as_ref(), None).is_ok(),
+                true
+            );
+
+            // validate versions of ids
+            let (decoded_version, _) = key_generator.decode_version_and_timestamp_from_id(&keyless_id_with_data);
+            assert_eq!(decoded_version, 0);
+            let (decoded_version, _) = key_generator.decode_version_and_timestamp_from_id(&ecdh_key_id_with_data);
+            assert_eq!(decoded_version, 0);
+            let (decoded_version, _) = key_generator.decode_version_and_timestamp_from_id(&ecdsa_key_id_with_data);
+            assert_eq!(decoded_version, 0);
+            // validate ids
+            assert_eq!(
+                key_generator.validate_keyless_id::<TestId>(keyless_id_with_data.as_ref(), TEST_ID_TYPE, Some(associated_data)).is_ok(),
+                true
+            );
+            assert_eq!(
+                key_generator.validate_ecdh_key_id::<TestId>(ecdh_key_id_with_data.as_ref(), Some(associated_data)).is_ok(),
+                true
+            );
+            assert_eq!(
+                key_generator.validate_ecdsa_key_id::<NistP384, TestId>(ecdsa_key_id_with_data.as_ref(), Some(associated_data)).is_ok(),
+                true
+            );
+
+            assert_eq!(key_generator.current_version, 2);
+            let (decoded_version, _) = key_generator.decode_version_and_timestamp_from_id(&keyless_id_with_data);
+            assert_eq!(decoded_version, 0);
+            assert_eq!(
+                key_generator.validate_keyless_id::<TestId>(keyless_id_with_data.as_ref(), TEST_ID_TYPE, Some(associated_data)).is_ok(),
+                true
+            );
+            let (decoded_version, _) = key_generator.decode_version_and_timestamp_from_id(&ecdh_key_id_with_data);
+            assert_eq!(decoded_version, 0);
+            assert_eq!(
+                key_generator.validate_ecdh_key_id::<TestId>(ecdh_key_id_with_data.as_ref(), Some(associated_data)).is_ok(),
+                true
+            );
+            let (decoded_version, _) = key_generator.decode_version_and_timestamp_from_id(&ecdsa_key_id_with_data);
+            assert_eq!(decoded_version, 0);
+            assert_eq!(
+                key_generator.validate_ecdsa_key_id::<NistP384, TestId>(ecdsa_key_id_with_data.as_ref(), Some(associated_data)).is_ok(),
+                true
             );
         }
     }

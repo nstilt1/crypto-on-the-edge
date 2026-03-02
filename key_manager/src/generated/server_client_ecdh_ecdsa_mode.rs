@@ -67,6 +67,8 @@ pub struct EcdhKey {
     pub ecdh_public_key: ::prost::alloc::vec::Vec<u8>,
     #[prost(string, tag = "3")]
     pub ecdh_public_key_pem: ::prost::alloc::string::String,
+    #[prost(uint64, optional, tag = "8")]
+    pub ecdh_expiration: ::core::option::Option<u64>,
 }
 /// An API response from the service.
 ///

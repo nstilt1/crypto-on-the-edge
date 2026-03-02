@@ -688,6 +688,7 @@ where
             ecdh_key_id: key_id.as_ref().to_vec(),
             ecdh_public_key: pubkey.to_sec1_bytes().as_ref().to_vec(),
             ecdh_public_key_pem: pubkey.to_string(),
+            ecdh_expiration: None,
         };
 
         let resp = Response {
@@ -1248,5 +1249,20 @@ mod tests {
             initial_shared_secret.raw_secret_bytes(),
             server_shared_secret.raw_secret_bytes()
         )
+    }
+
+    #[test]
+    fn improper_ecdh_key_expiration() {
+        let mut key_manager = init_key_manager();
+        let (key_id, pubkey) = key_manager
+            .key_generator
+            .generate_ecdh_pubkey_and_id::<NistP384, BigId>(
+                &[],
+                None,
+                Some(key_manager.client_id.as_ref()),
+                &mut key_manager.rng,
+            ).unwrap();
+        let (version, timestamp) = key_manager.key_generator.decode_version_and_timestamp_from_id::<BigId>(&key_id);
+        assert!(timestamp.is_none());
     }
 }

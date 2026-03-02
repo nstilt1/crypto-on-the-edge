@@ -28,5 +28,5 @@ sha2 = "0.11.0-pre.3"
 default = ["server_client_ecdh_ecdsa_mode"]
 server_client_ecdh_ecdsa_mode = []
 single_party_mode = []
-logging = ["tracing"]
+logging = ["tracing", "private_key_generator/logging"]
 zeroize = ["private_key_generator/zeroize"]

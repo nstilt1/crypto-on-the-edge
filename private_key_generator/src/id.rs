@@ -28,8 +28,11 @@ use chacha20::rand_core::RngCore;
 use core::cmp::min;
 use core::marker::PhantomData;
 
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", not(test)))]
 use std::time::{SystemTime, UNIX_EPOCH};
+
+#[cfg(all(feature = "std", test))]
+use mock_instant::thread_local::{SystemTime, UNIX_EPOCH};
 
 use crate::{
     error::{IdCreationError, InvalidId},

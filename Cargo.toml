@@ -1,10 +1,10 @@
 [workspace]
+resolver = "3"
 members = [ 
     "example", 
     "key_manager", 
-    "key_manager_docs",
     "private_key_generator",
-    "private_key_generator_docs",
+    "stack_sanitizer",
     "zero_stack",
     "benches"
 ]

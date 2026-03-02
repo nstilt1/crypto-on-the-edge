@@ -143,3 +143,35 @@ pub mod prelude {
     };
     pub use chacha20::*;
 }
+
+/// Conditionally puts out debugging messages based on the "logging" feature.
+#[macro_export]
+macro_rules! error_log {
+    ($($arg:tt)*) => {{
+        #[cfg(feature = "logging")]
+        tracing::error!($($arg)*);
+    }};
+}
+
+#[macro_export]
+macro_rules! debug_log {
+    ($($arg:tt)*) => {{
+        #[cfg(feature = "logging")]
+        tracing::debug!($($arg)*)
+    }};
+}
+
+#[cfg(all(feature = "std", test))]
+pub(crate) mod time {
+    pub use mock_instant::thread_local::{SystemTime, UNIX_EPOCH};
+}
+
+#[cfg(all(feature = "std", not(test)))]
+pub(crate) mod time {
+    pub use std::time::{SystemTime, UNIX_EPOCH};
+}
+
+#[cfg(not(feature = "std"))]
+pub(crate) mod time {
+    pub use core::time::Duration;
+}
