@@ -5,7 +5,7 @@
 macro_rules! error_log {
     ($($arg:tt)*) => {{
         #[cfg(feature = "logging")]
-        tracing::error!($($arg)*);
+        $crate::tracing::error!($($arg)*);
     }};
 }
 
@@ -13,7 +13,7 @@ macro_rules! error_log {
 macro_rules! debug_log {
     ($($arg:tt)*) => {{
         #[cfg(feature = "logging")]
-        tracing::debug!($($arg)*)
+        $crate::tracing::debug!($($arg)*)
     }};
 }
 

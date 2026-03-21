@@ -12,6 +12,9 @@ pub mod error;
 mod macros;
 pub mod prelude;
 
+#[cfg(feature = "tracing")]
+pub use tracing;
+
 pub mod generated;
 
 #[cfg(feature = "server_client_ecdh_ecdsa_mode")]
