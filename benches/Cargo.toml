@@ -9,9 +9,9 @@ edition = "2021"
 aes-gcm = { version = "0.10" }
 chacha20poly1305 = "0.10"
 http_private_key_manager = { path = "../key_manager", features = ["zeroize"] }
-p384 = { git = "https://github.com/RustCrypto/elliptic-curves.git", branch = "master", package = "p384", version = "0.14.0-pre", features = ["jwk", "ecdsa", "pem"]  }
-sha2 = { version = "0.11.0-pre.3" }
-sha3 = { version = "0.11.0-pre.3", features = ["asm"]}
+p384 = { version = "0.13.1", features = ["jwk", "ecdsa", "pem"]  }
+sha2 = { version = "0.10.8" }
+sha3 = { version = "0.10.8" }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

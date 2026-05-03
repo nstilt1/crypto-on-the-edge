@@ -247,9 +247,9 @@ pub fn extract_ints_from_slice<const NUMS: usize>(
 
 #[cfg(test)]
 mod tests {
+    use rand::Rng;
+
     use super::*;
-    use rand::rngs::OsRng;
-    use rand::RngCore;
     use std::format;
     use std::string::String;
 
@@ -258,7 +258,7 @@ mod tests {
         for bits_to_preserve in 0..8 {
             for num_bits in 1..max_bits {
                 let mut random_slice = [0u8; 80];
-                OsRng.fill_bytes(&mut random_slice);
+                rand::rng().fill_bytes(&mut random_slice);
 
                 // insert the maximum value that can be represented with `num_bits`
                 let val_to_insert: u64 = (1 << num_bits) - 1;
@@ -285,7 +285,7 @@ mod tests {
                 }
                 assert_eq!(decoded_int, val_to_insert);
 
-                OsRng.fill_bytes(&mut random_slice)
+                rand::rng().fill_bytes(&mut random_slice)
             }
         }
     }
@@ -303,11 +303,11 @@ mod tests {
             for j in 1..56 {
                 for bits_to_preserve in 0..7 {
                     for _test in 0..12 {
-                        let i_bit_number = OsRng.next_u64() & u64_mask(i);
-                        let j_bit_number = OsRng.next_u64() & u64_mask(j);
+                        let i_bit_number = rand::rng().next_u64() & u64_mask(i);
+                        let j_bit_number = rand::rng().next_u64() & u64_mask(j);
 
                         let mut random_slice = [0u8; 15];
-                        OsRng.fill_bytes(&mut random_slice);
+                        rand::rng().fill_bytes(&mut random_slice);
 
                         let num_bits = &[i as u8, j as u8];
 

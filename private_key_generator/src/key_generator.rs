@@ -10,10 +10,11 @@ use crate::{
         years_to_seconds,
     },
 };
-use chacha20::rand_core::RngCore;
+use chacha20::rand_core::Rng;
 use ecdsa::{
     elliptic_curve::{ops::Invert, CurveArithmetic, FieldBytes, FieldBytesSize, Scalar},
-    EcdsaCurve, SignatureSize, SigningKey,
+    hazmat::SignPrimitive,
+    PrimeCurve, SignatureSize, SigningKey,
 };
 use elliptic_curve::{
     ecdh::{diffie_hellman, SharedSecret},
@@ -23,10 +24,10 @@ use elliptic_curve::{
 use hkdf::{
     hmac::{
         digest::{
-            array::{Array, ArraySize},
+            generic_array::{ArrayLength, GenericArray},
             FixedOutputReset, Key, KeyInit, Output, OutputSizeUser,
         },
-        Hmac, Mac, SimpleHmac,
+        Mac, SimpleHmac,
     },
     Hkdf, HmacImpl,
 };
@@ -36,20 +37,20 @@ use subtle::{ConstantTimeEq, CtOption};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use core::marker::PhantomData;
+#[cfg(all(feature = "std", test))]
+use mock_instant::thread_local::{MockClock, SystemTime, UNIX_EPOCH};
+#[cfg(all(feature = "std", test))]
+use std::{format, string::String};
 #[cfg(all(feature = "std", not(test)))]
 use std::{
     format,
     string::String,
     time::{SystemTime, UNIX_EPOCH},
 };
-#[cfg(all(feature = "std", test))]
-use std::{format, string::String};
-#[cfg(all(feature = "std", test))]
-use mock_instant::thread_local::{SystemTime, UNIX_EPOCH, MockClock};
 
+use crate::debug_log;
 use crate::traits::EncodedId;
 use crate::typenum::Unsigned;
-use crate::debug_log;
 
 /// A convenience type if you wish to use a hash function that does not
 /// implement `EagerHash`.
@@ -407,7 +408,7 @@ pub type StaticVersionConfig<const TIMESTAMP_BITS: u8, const TIMESTAMP_PRECISION
 ///     b"arbitrary application ID",
 /// );
 /// ```
-pub struct KeyGenerator<M, V, Rng, HkdfDigest, I = Hmac<HkdfDigest>>
+pub struct KeyGenerator<M, V, Rng, HkdfDigest, I = SimpleHmac<HkdfDigest>>
 where
     M: Mac + KeyInit + FixedOutputReset,
     V: VersionConfig,
@@ -486,7 +487,8 @@ where
             let s = d.as_secs();
             debug_assert!(
                 s >= V::EPOCH,
-                "Current time is before the versioning epoch, which may cause issues with ID generation. Current time: {}, Versioning epoch: {}",
+                "Current time is before the versioning epoch, which may cause issues with ID \
+                 generation. Current time: {}, Versioning epoch: {}",
                 s,
                 V::EPOCH
             );
@@ -651,7 +653,7 @@ where
         hkdf_key: &[u8],
         application_id: &[u8],
     ) -> (
-        Array<u8, <Self::HkdfDigest as OutputSizeUser>::OutputSize>,
+        GenericArray<u8, <Self::HkdfDigest as OutputSizeUser>::OutputSize>,
         Self,
     ) {
         let (prk, lvl_1_hkdf) = Hkdf::<HkdfDigest, I>::extract(Some(hkdf_key), application_id);
@@ -673,7 +675,8 @@ where
         debug_assert_ne!(rng_seed, Default::default());
         let hkdf =
             Hkdf::<HkdfDigest, I>::from_prk(&kdf_prk).expect("This key should be long enough");
-        let mac = M::new_from_slice(&mac_key).expect("This key should be the correct length");
+        let mac = <M as KeyInit>::new_from_slice(&mac_key)
+            .expect("This key should be the correct length");
         let mut rng = R::init_rng(&mut rng_seed);
 
         let current_version = Self::get_current_version();
@@ -718,7 +721,8 @@ where
             .expand(b"lvl 2 rng", &mut R::set_seed(&mut rng_seed))
             .expect("seed should be small enough");
 
-        let mac = M::new_from_slice(&mac_key).expect("This key should be the correct length");
+        let mac = <M as KeyInit>::new_from_slice(&mac_key)
+            .expect("This key should be the correct length");
         let mut rng = R::init_rng(&mut rng_seed);
 
         let current_version = Self::get_current_version();
@@ -756,7 +760,8 @@ where
             if V::VERSION_BITS == 0 {
                 return (0, None);
             }
-            let mut zeroed_id: Array<u8, Id::IdLen> = Array::clone_from_slice(id.as_ref());
+            let mut zeroed_id: GenericArray<u8, Id::IdLen> =
+                GenericArray::clone_from_slice(id.as_ref());
             insert_ints_into_slice(
                 &[0],
                 &mut zeroed_id.as_mut()[Id::METADATA_IDX..],
@@ -781,7 +786,8 @@ where
             return (encrypted_version as u32 ^ version_mask, None);
         }
 
-        let mut zeroed_id: Array<u8, Id::IdLen> = Array::clone_from_slice(id.as_ref());
+        let mut zeroed_id: GenericArray<u8, Id::IdLen> =
+            GenericArray::clone_from_slice(id.as_ref());
         insert_ints_into_slice(
             &[0, 0],
             &mut zeroed_id[Id::METADATA_IDX..],
@@ -824,7 +830,7 @@ where
         id_type: &[u8],
         expiration: Option<u64>,
         associated_data: Option<&[u8]>,
-        rng: &mut dyn RngCore,
+        rng: &mut dyn Rng,
     ) -> Result<Id, IdCreationError>
     where
         Id: EncodedId,
@@ -881,12 +887,12 @@ where
         prefix: &[u8],
         expiration: Option<u64>,
         associated_data: Option<&[u8]>,
-        rng: &mut dyn RngCore,
+        rng: &mut dyn Rng,
     ) -> Result<(Id, SigningKey<C>), IdCreationError>
     where
-        C: EcdsaCurve + CurveArithmetic + JwkParameters,
-        Scalar<C>: Invert<Output = CtOption<Scalar<C>>>,
-        SignatureSize<C>: ArraySize,
+        C: PrimeCurve + CurveArithmetic + JwkParameters,
+        Scalar<C>: Invert<Output = CtOption<Scalar<C>>> + SignPrimitive<C>,
+        SignatureSize<C>: ArrayLength<u8>,
         Id: EncodedId,
     {
         let (mut id, trimmed_timestamp) = Id::generate::<V>(
@@ -914,6 +920,7 @@ where
                         b"ecdsa",
                         C::CRV.as_ref(),
                         id.as_ref(),
+                        self.current_version_ecc_salt.as_slice(),
                         additional_info,
                         &[ctr],
                     ],
@@ -942,9 +949,9 @@ where
         associated_data: Option<&[u8]>,
     ) -> Result<Id, InvalidId>
     where
-        C: EcdsaCurve + CurveArithmetic + JwkParameters,
-        Scalar<C>: Invert<Output = CtOption<Scalar<C>>>,
-        SignatureSize<C>: ArraySize,
+        C: PrimeCurve + CurveArithmetic + JwkParameters,
+        Scalar<C>: Invert<Output = CtOption<Scalar<C>>> + SignPrimitive<C>,
+        SignatureSize<C>: ArrayLength<u8>,
         Id: EncodedId,
     {
         let id: Id = id.try_into()?;
@@ -994,9 +1001,9 @@ where
         associated_data: Option<&[u8]>,
     ) -> SigningKey<C>
     where
-        C: EcdsaCurve + CurveArithmetic + JwkParameters,
-        Scalar<C>: Invert<Output = CtOption<Scalar<C>>>,
-        SignatureSize<C>: ArraySize,
+        C: PrimeCurve + CurveArithmetic + JwkParameters,
+        Scalar<C>: Invert<Output = CtOption<Scalar<C>>> + SignPrimitive<C>,
+        SignatureSize<C>: ArrayLength<u8>,
         Id: EncodedId,
     {
         let additional_info = if let Some(info) = associated_data {
@@ -1008,6 +1015,11 @@ where
         } else {
             &[]
         };
+        let (version, _timestamp) = self.decode_version_and_timestamp_from_id(id);
+        let mut ecc_salt_buffer = self.current_version_ecc_salt.clone();
+        if version.ne(&self.current_version) {
+            self.rng.get_version_ecc_salt(version, &mut ecc_salt_buffer);
+        };
         let mut key_bytes = FieldBytes::<C>::default();
         let mut ctr: u8 = 0;
         let private_ecdsa_key: SigningKey<C> = loop {
@@ -1017,6 +1029,7 @@ where
                         b"ecdsa",
                         C::CRV.as_ref(),
                         id.as_ref(),
+                        ecc_salt_buffer.as_slice(),
                         additional_info,
                         &[ctr],
                     ],
@@ -1045,7 +1058,7 @@ where
         prefix: &[u8],
         expiration: Option<u64>,
         associated_data: Option<&[u8]>,
-        rng: &mut dyn RngCore,
+        rng: &mut dyn Rng,
     ) -> Result<(Id, PublicKey<C>), IdCreationError>
     where
         C: CurveArithmetic + JwkParameters,
@@ -1078,6 +1091,7 @@ where
                         b"ecdh",
                         C::CRV.as_ref(),
                         id.as_ref(),
+                        self.current_version_ecc_salt.as_slice(),
                         additional_info,
                         &[ctr],
                     ],
@@ -1147,7 +1161,7 @@ where
 
     #[inline]
     fn ecdh_using_key_id<C, Id>(
-        &self,
+        &mut self,
         id: &Id,
         associated_data: Option<&[u8]>,
         pubkey: PublicKey<C>,
@@ -1169,6 +1183,12 @@ where
             &[]
         };
 
+        let (version, _timestamp) = self.decode_version_and_timestamp_from_id(id);
+        let mut ecc_salt_buffer = self.current_version_ecc_salt.clone();
+        if version.ne(&self.current_version) {
+            self.rng.get_version_ecc_salt(version, &mut ecc_salt_buffer);
+        };
+
         let mut key_bytes: FieldBytes<C>;
         let mut ctr: u8 = 0;
         #[allow(unused_mut)]
@@ -1180,6 +1200,7 @@ where
                         b"ecdh",
                         C::CRV.as_ref(),
                         id.as_ref(),
+                        ecc_salt_buffer.as_slice(),
                         additional_info,
                         &[ctr],
                     ],
@@ -1271,7 +1292,6 @@ mod tests {
     use crate::{traits::CryptoKeyGenerator, KeyGenerator};
     use chacha20::ChaCha8Rng;
     use hkdf::hmac::Hmac;
-    use rand::rngs::OsRng;
     use rand::rngs::StdRng;
     use rand::SeedableRng;
     use sha2::Sha256;
@@ -1302,14 +1322,12 @@ mod tests {
     }
 
     macro_rules! init_keygenerator {
-        () => {
-            {
-                use super::*;
-                MockClock::advance(Duration::from_secs(TEST_EPOCH + 1000000));
+        () => {{
+            use super::*;
+            MockClock::advance(Duration::from_secs(TEST_EPOCH + 1000000));
 
-                Sha2KeyGenerator::new(&TEST_HMAC_KEY, &[])
-            }
-        };
+            Sha2KeyGenerator::new(&TEST_HMAC_KEY, &[])
+        }};
     }
 
     macro_rules! init_keygenerator_with_versioning {
@@ -1340,7 +1358,7 @@ mod tests {
                         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
                         for t in 0..(1 << $precision_reduction) {
                             let input_expiration_time = t + now;
-                            let expiring_id = key_generator.generate_keyless_id::<TestId>(&[], &[], Some(input_expiration_time), None, &mut OsRng).unwrap();
+                            let expiring_id = key_generator.generate_keyless_id::<TestId>(&[], &[], Some(input_expiration_time), None, &mut rand::rng()).unwrap();
 
                             let minimum_added_time = if $precision_reduction > 0 {
                                 (1 << ($precision_reduction - 1)) + 1
@@ -1389,7 +1407,7 @@ mod tests {
 
             let mut key_generator = KeyGen::new(&[42u8; 32], b"");
             let id = key_generator
-                .generate_keyless_id::<VersionedTestId>(&[], &[], None, None, &mut OsRng)
+                .generate_keyless_id::<VersionedTestId>(&[], &[], None, None, &mut rand::rng())
                 .unwrap();
 
             let (decoded_version, _) = key_generator.decode_version_and_timestamp_from_id(&id);
@@ -1407,11 +1425,10 @@ mod tests {
     /// Some validation tests
     mod validation {
 
-        use mock_instant::thread_local::{SystemTime, UNIX_EPOCH, MockClock};
-        use std::time::Duration;
         use chacha20::ChaCha8Rng;
         use elliptic_curve::consts::{U48, U5, U8};
-        use rand::rngs::OsRng;
+        use mock_instant::thread_local::{MockClock, SystemTime, UNIX_EPOCH};
+        use std::time::Duration;
 
         use crate::{
             id::timestamp_policies::use_timestamps, key_generator::StaticVersionConfig,
@@ -1420,7 +1437,7 @@ mod tests {
 
         use super::{
             years_to_seconds, CryptoKeyGenerator, Hmac, InvalidId, SeedableRng, Sha256,
-            Sha2KeyGenerator, StdRng, TestId, TEST_EPOCH, TEST_HMAC_KEY, TEST_ID_TYPE,
+            StdRng, TestId, TEST_EPOCH, TEST_ID_TYPE,
         };
 
         #[test]
@@ -1435,7 +1452,7 @@ mod tests {
             type IdVersion0 = BinaryId<U48, U5, 3, use_timestamps::Never>;
 
             let id = key_generator
-                .generate_keyless_id::<IdVersion0>(&[], &[], None, None, &mut OsRng)
+                .generate_keyless_id::<IdVersion0>(&[], &[], None, None, &mut rand::rng())
                 .unwrap();
 
             let result = key_generator.validate_keyless_id::<IdVersion0>(id.as_ref(), &[], None);
@@ -1595,7 +1612,13 @@ mod tests {
 
             let (_prk, mut keygen) = KeyGen::extract(&[3u8; 32], b"test");
             let expiring_id: TestId = keygen
-                .generate_keyless_id(&[], TEST_ID_TYPE, Some(expiration_time), None, &mut OsRng)
+                .generate_keyless_id(
+                    &[],
+                    TEST_ID_TYPE,
+                    Some(expiration_time),
+                    None,
+                    &mut rand::rng(),
+                )
                 .unwrap();
 
             let validation: Result<TestId, InvalidId> =
@@ -1726,7 +1749,7 @@ mod tests {
                 &[],
                 Some(expiration),
                 None,
-                &mut OsRng,
+                &mut rand::rng(),
             );
 
             assert_eq!(length_off_by_1.is_err(), true);
@@ -1736,7 +1759,7 @@ mod tests {
                 &[],
                 Some(expiration),
                 None,
-                &mut OsRng,
+                &mut rand::rng(),
             );
 
             assert_eq!(length_exact.is_ok(), true);
@@ -1750,7 +1773,7 @@ mod tests {
             type TestId = ShorthandId<use_timestamps::Always>;
 
             let id_should_have_timestamp_error =
-                key_gen.generate_keyless_id::<TestId>(&[], &[], None, None, &mut OsRng);
+                key_gen.generate_keyless_id::<TestId>(&[], &[], None, None, &mut rand::rng());
 
             assert_eq!(
                 id_should_have_timestamp_error.unwrap_err(),
@@ -1766,7 +1789,7 @@ mod tests {
                 &[],
                 Some(now + 1_000_000_001),
                 None,
-                &mut OsRng,
+                &mut rand::rng(),
             );
 
             assert_eq!(
@@ -1779,14 +1802,19 @@ mod tests {
                 &[],
                 Some(now + 1_000_000_000),
                 None,
-                &mut OsRng,
+                &mut rand::rng(),
             );
 
             assert_eq!(expiration_timestamp_barely_ok.is_ok(), true);
 
             type TestId2 = ShorthandId<use_timestamps::Never>;
-            let shouldnt_have_expiration_time =
-                key_gen.generate_keyless_id::<TestId2>(&[], &[], Some(now + 5), None, &mut OsRng);
+            let shouldnt_have_expiration_time = key_gen.generate_keyless_id::<TestId2>(
+                &[],
+                &[],
+                Some(now + 5),
+                None,
+                &mut rand::rng(),
+            );
 
             assert_eq!(
                 shouldnt_have_expiration_time.unwrap_err(),
@@ -1797,15 +1825,15 @@ mod tests {
 
     mod latent_bug_search {
         use super::*;
-        use p384::NistP384;
         use crate::prelude::U8;
+        use p384::NistP384;
 
         type TestVersionConfig = VersioningConfig<
             TEST_EPOCH,
-            600, // version lifetime
-            32, // version bits
-            32, // timestamp bits,
-            8, // timestamp precision loss
+            600,                     // version lifetime
+            32,                      // version bits
+            32,                      // timestamp bits,
+            8,                       // timestamp precision loss
             { years_to_seconds(1) }, // max expiration time
         >;
         type KeyGen = KeyGenerator<Hmac<Sha256>, TestVersionConfig, ChaCha8Rng, Sha256>;
@@ -1821,12 +1849,7 @@ mod tests {
                 .unwrap();
 
             let ecdh_key_id = key_generator
-                .generate_ecdh_pubkey_and_id::<NistP384, TestId>(
-                    &[],
-                    None,
-                    None,
-                    &mut rng!(),
-                )
+                .generate_ecdh_pubkey_and_id::<NistP384, TestId>(&[], None, None, &mut rng!())
                 .unwrap()
                 .0;
 
@@ -1838,40 +1861,78 @@ mod tests {
             // generate IDs with associated data
             let associated_data = b"some associated data";
             let keyless_id_with_data = key_generator
-                .generate_keyless_id::<TestId>(&[], TEST_ID_TYPE, None, Some(associated_data), &mut rng!())
+                .generate_keyless_id::<TestId>(
+                    &[],
+                    TEST_ID_TYPE,
+                    None,
+                    Some(associated_data),
+                    &mut rng!(),
+                )
                 .unwrap();
             let ecdh_key_id_with_data = key_generator
-                .generate_ecdh_pubkey_and_id::<NistP384, TestId>(&[], None, Some(associated_data), &mut rng!())
+                .generate_ecdh_pubkey_and_id::<NistP384, TestId>(
+                    &[],
+                    None,
+                    Some(associated_data),
+                    &mut rng!(),
+                )
                 .unwrap()
                 .0;
             let ecdsa_key_id_with_data = key_generator
-                .generate_ecdsa_key_and_id::<NistP384, TestId>(&[], None, Some(associated_data), &mut rng!())
+                .generate_ecdsa_key_and_id::<NistP384, TestId>(
+                    &[],
+                    None,
+                    Some(associated_data),
+                    &mut rng!(),
+                )
                 .unwrap()
                 .0;
 
             // validate with same epoch
             assert_eq!(
-                key_generator.validate_keyless_id::<TestId>(keyless_id.as_ref(), TEST_ID_TYPE, None).is_ok(),
+                key_generator
+                    .validate_keyless_id::<TestId>(keyless_id.as_ref(), TEST_ID_TYPE, None)
+                    .is_ok(),
                 true
             );
             assert_eq!(
-                key_generator.validate_ecdh_key_id::<TestId>(ecdh_key_id.as_ref(), None).is_ok(),
+                key_generator
+                    .validate_ecdh_key_id::<TestId>(ecdh_key_id.as_ref(), None)
+                    .is_ok(),
                 true
             );
             assert_eq!(
-                key_generator.validate_ecdsa_key_id::<NistP384, TestId>(ecdsa_key_id.as_ref(), None).is_ok(),
+                key_generator
+                    .validate_ecdsa_key_id::<NistP384, TestId>(ecdsa_key_id.as_ref(), None)
+                    .is_ok(),
                 true
             );
             assert_eq!(
-                key_generator.validate_keyless_id::<TestId>(keyless_id_with_data.as_ref(), TEST_ID_TYPE, Some(associated_data)).is_ok(),
+                key_generator
+                    .validate_keyless_id::<TestId>(
+                        keyless_id_with_data.as_ref(),
+                        TEST_ID_TYPE,
+                        Some(associated_data)
+                    )
+                    .is_ok(),
                 true
             );
             assert_eq!(
-                key_generator.validate_ecdh_key_id::<TestId>(ecdh_key_id_with_data.as_ref(), Some(associated_data)).is_ok(),
+                key_generator
+                    .validate_ecdh_key_id::<TestId>(
+                        ecdh_key_id_with_data.as_ref(),
+                        Some(associated_data)
+                    )
+                    .is_ok(),
                 true
             );
             assert_eq!(
-                key_generator.validate_ecdsa_key_id::<NistP384, TestId>(ecdsa_key_id_with_data.as_ref(), Some(associated_data)).is_ok(),
+                key_generator
+                    .validate_ecdsa_key_id::<NistP384, TestId>(
+                        ecdsa_key_id_with_data.as_ref(),
+                        Some(associated_data)
+                    )
+                    .is_ok(),
                 true
             );
 
@@ -1879,63 +1940,110 @@ mod tests {
             MockClock::advance_system_time(Duration::from_secs(1300));
             key_generator = KeyGen::new(&TEST_HMAC_KEY, b"");
             assert_eq!(key_generator.current_version, 2);
-            let (decoded_version, _) = key_generator.decode_version_and_timestamp_from_id(&keyless_id);
+            let (decoded_version, _) =
+                key_generator.decode_version_and_timestamp_from_id(&keyless_id);
             assert_eq!(decoded_version, 0);
             assert_eq!(
-                key_generator.validate_keyless_id::<TestId>(keyless_id.as_ref(), TEST_ID_TYPE, None).is_ok(),
+                key_generator
+                    .validate_keyless_id::<TestId>(keyless_id.as_ref(), TEST_ID_TYPE, None)
+                    .is_ok(),
                 true
             );
-            let (decoded_version, _) = key_generator.decode_version_and_timestamp_from_id(&ecdh_key_id);
+            let (decoded_version, _) =
+                key_generator.decode_version_and_timestamp_from_id(&ecdh_key_id);
             assert_eq!(decoded_version, 0);
             assert_eq!(
-                key_generator.validate_ecdh_key_id::<TestId>(ecdh_key_id.as_ref(), None).is_ok(),
+                key_generator
+                    .validate_ecdh_key_id::<TestId>(ecdh_key_id.as_ref(), None)
+                    .is_ok(),
                 true
             );
-            let (decoded_version, _) = key_generator.decode_version_and_timestamp_from_id(&ecdsa_key_id);
+            let (decoded_version, _) =
+                key_generator.decode_version_and_timestamp_from_id(&ecdsa_key_id);
             assert_eq!(decoded_version, 0);
             assert_eq!(
-                key_generator.validate_ecdsa_key_id::<NistP384, TestId>(ecdsa_key_id.as_ref(), None).is_ok(),
+                key_generator
+                    .validate_ecdsa_key_id::<NistP384, TestId>(ecdsa_key_id.as_ref(), None)
+                    .is_ok(),
                 true
             );
 
             // validate versions of ids
-            let (decoded_version, _) = key_generator.decode_version_and_timestamp_from_id(&keyless_id_with_data);
+            let (decoded_version, _) =
+                key_generator.decode_version_and_timestamp_from_id(&keyless_id_with_data);
             assert_eq!(decoded_version, 0);
-            let (decoded_version, _) = key_generator.decode_version_and_timestamp_from_id(&ecdh_key_id_with_data);
+            let (decoded_version, _) =
+                key_generator.decode_version_and_timestamp_from_id(&ecdh_key_id_with_data);
             assert_eq!(decoded_version, 0);
-            let (decoded_version, _) = key_generator.decode_version_and_timestamp_from_id(&ecdsa_key_id_with_data);
+            let (decoded_version, _) =
+                key_generator.decode_version_and_timestamp_from_id(&ecdsa_key_id_with_data);
             assert_eq!(decoded_version, 0);
             // validate ids
             assert_eq!(
-                key_generator.validate_keyless_id::<TestId>(keyless_id_with_data.as_ref(), TEST_ID_TYPE, Some(associated_data)).is_ok(),
+                key_generator
+                    .validate_keyless_id::<TestId>(
+                        keyless_id_with_data.as_ref(),
+                        TEST_ID_TYPE,
+                        Some(associated_data)
+                    )
+                    .is_ok(),
                 true
             );
             assert_eq!(
-                key_generator.validate_ecdh_key_id::<TestId>(ecdh_key_id_with_data.as_ref(), Some(associated_data)).is_ok(),
+                key_generator
+                    .validate_ecdh_key_id::<TestId>(
+                        ecdh_key_id_with_data.as_ref(),
+                        Some(associated_data)
+                    )
+                    .is_ok(),
                 true
             );
             assert_eq!(
-                key_generator.validate_ecdsa_key_id::<NistP384, TestId>(ecdsa_key_id_with_data.as_ref(), Some(associated_data)).is_ok(),
+                key_generator
+                    .validate_ecdsa_key_id::<NistP384, TestId>(
+                        ecdsa_key_id_with_data.as_ref(),
+                        Some(associated_data)
+                    )
+                    .is_ok(),
                 true
             );
 
             assert_eq!(key_generator.current_version, 2);
-            let (decoded_version, _) = key_generator.decode_version_and_timestamp_from_id(&keyless_id_with_data);
+            let (decoded_version, _) =
+                key_generator.decode_version_and_timestamp_from_id(&keyless_id_with_data);
             assert_eq!(decoded_version, 0);
             assert_eq!(
-                key_generator.validate_keyless_id::<TestId>(keyless_id_with_data.as_ref(), TEST_ID_TYPE, Some(associated_data)).is_ok(),
+                key_generator
+                    .validate_keyless_id::<TestId>(
+                        keyless_id_with_data.as_ref(),
+                        TEST_ID_TYPE,
+                        Some(associated_data)
+                    )
+                    .is_ok(),
                 true
             );
-            let (decoded_version, _) = key_generator.decode_version_and_timestamp_from_id(&ecdh_key_id_with_data);
+            let (decoded_version, _) =
+                key_generator.decode_version_and_timestamp_from_id(&ecdh_key_id_with_data);
             assert_eq!(decoded_version, 0);
             assert_eq!(
-                key_generator.validate_ecdh_key_id::<TestId>(ecdh_key_id_with_data.as_ref(), Some(associated_data)).is_ok(),
+                key_generator
+                    .validate_ecdh_key_id::<TestId>(
+                        ecdh_key_id_with_data.as_ref(),
+                        Some(associated_data)
+                    )
+                    .is_ok(),
                 true
             );
-            let (decoded_version, _) = key_generator.decode_version_and_timestamp_from_id(&ecdsa_key_id_with_data);
+            let (decoded_version, _) =
+                key_generator.decode_version_and_timestamp_from_id(&ecdsa_key_id_with_data);
             assert_eq!(decoded_version, 0);
             assert_eq!(
-                key_generator.validate_ecdsa_key_id::<NistP384, TestId>(ecdsa_key_id_with_data.as_ref(), Some(associated_data)).is_ok(),
+                key_generator
+                    .validate_ecdsa_key_id::<NistP384, TestId>(
+                        ecdsa_key_id_with_data.as_ref(),
+                        Some(associated_data)
+                    )
+                    .is_ok(),
                 true
             );
         }

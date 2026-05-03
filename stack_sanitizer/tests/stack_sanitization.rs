@@ -17,8 +17,8 @@ mod stack_sanitization_tests {
         let mut heap_stack = ZeroizingHeapStack::new(4);
         let result = unsafe { switch_stacks(&mut heap_stack, || dummy_fn()) };
         assert_eq!(result.1, 12345);
-        // results in segmentation fault, which is somewhat normal... just wanted
-        // to try it
+        // results in segmentation fault, which is somewhat normal... just
+        // wanted to try it
         // assert_eq!(unsafe {*result.0}, 42);
     }
 

@@ -15,7 +15,7 @@ use core::{ptr, sync::atomic};
 
 extern crate std;
 
-/// A zeroizing heap-based stack. Feed one of these into the `switch_stacks` 
+/// A zeroizing heap-based stack. Feed one of these into the `switch_stacks`
 /// function.
 pub struct ZeroizingHeapStack {
     new_stack: *mut u8,
@@ -25,19 +25,20 @@ pub struct ZeroizingHeapStack {
 const ALIGNMENT: usize = 32;
 
 impl ZeroizingHeapStack {
-    /// Initializes a new "Zeroizing Heap Stack". To be fed into the `switch_stacks` 
-    /// function, and it can be reused, but it must not be reused while it is in use.
-    /// The borrow-checker should enforce this.
+    /// Initializes a new "Zeroizing Heap Stack". To be fed into the
+    /// `switch_stacks` function, and it can be reused, but it must not be
+    /// reused while it is in use. The borrow-checker should enforce this.
     pub fn new(stack_kb: usize) -> ZeroizingHeapStack {
         let stack_bytes = stack_kb * 1024;
         assert!(
             stack_bytes as isize > 0,
-            "stack_kb must be positive and must not overflow isize when expanded to number of bytes instead of KB"
+            "stack_kb must be positive and must not overflow isize when expanded to number of \
+             bytes instead of KB"
         );
         // On these platforms we do not use stack guards. this is very unfortunate,
         // but there is not much we can do about it without OS support.
-        // We simply allocate the requested size from the global allocator with a suitable
-        // alignment.
+        // We simply allocate the requested size from the global allocator with a
+        // suitable alignment.
         let stack_bytes = stack_bytes
             .checked_add(ALIGNMENT - 1)
             .expect("unreasonably large stack requested")

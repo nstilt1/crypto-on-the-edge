@@ -17,7 +17,7 @@ use zeroize::ZeroizeOnDrop;
 
 extern crate std;
 
-/// A zeroizing heap-based stack. Feed one of these into the `switch_stacks` 
+/// A zeroizing heap-based stack. Feed one of these into the `switch_stacks`
 /// function.
 pub struct ZeroizingHeapStack {
     mapping: *mut u8,
@@ -26,14 +26,15 @@ pub struct ZeroizingHeapStack {
 }
 
 impl ZeroizingHeapStack {
-    /// Initializes a new "Zeroizing Heap Stack". To be fed into the `switch_stacks` 
-    /// function, and it can be reused, but it must not be reused while it is in use.
-    /// The borrow-checker should enforce this.
+    /// Initializes a new "Zeroizing Heap Stack". To be fed into the
+    /// `switch_stacks` function, and it can be reused, but it must not be
+    /// reused while it is in use. The borrow-checker should enforce this.
     pub fn new(stack_kb: usize) -> ZeroizingHeapStack {
-        // For maximum portability we want to produce a stack that is aligned to a page and has
-        // a size that’s a multiple of page size. It is natural to use mmap to allocate
-        // these pages. Furthermore, we want to allocate two extras pages for the stack guard.
-        // To achieve that we do our calculations in number of pages and convert to bytes last.
+        // For maximum portability we want to produce a stack that is aligned to a page
+        // and has a size that’s a multiple of page size. It is natural to use
+        // mmap to allocate these pages. Furthermore, we want to allocate two
+        // extras pages for the stack guard. To achieve that we do our
+        // calculations in number of pages and convert to bytes last.
         let page_size = page_size();
         let requested_pages = stack_kb
             .checked_mul(1024)
@@ -99,7 +100,8 @@ impl ZeroizingHeapStack {
         }
     }
 
-    // TODO this should return a *mut [u8], but pointer slices only got proper support with Rust 1.79.
+    // TODO this should return a *mut [u8], but pointer slices only got proper
+    // support with Rust 1.79.
     /// Returns (`start ptr of usable stack`, `size of usable stack`).
     pub fn stack_area(&self) -> (*mut u8, usize) {
         unsafe {
@@ -144,7 +146,7 @@ mod tests {
         for kb in 1..64 {
             let stack = ZeroizingHeapStack::new(kb);
             assert_eq!(
-                stack.stack_area().1, 
+                stack.stack_area().1,
                 (kb * 1024).div_ceil(page_size()) * page_size()
             );
         }

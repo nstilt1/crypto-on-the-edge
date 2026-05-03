@@ -5,10 +5,10 @@ use crate::{
     VersionConfig,
 };
 use chacha20::{
-    rand_core::{RngCore, SeedableRng},
+    rand_core::{Rng, SeedableRng},
     ChaCha12Rng, ChaCha20Rng, ChaCha8Rng,
 };
-use ecdsa::{EcdsaCurve, SignatureSize, SigningKey};
+use ecdsa::{hazmat::SignPrimitive, PrimeCurve, SignatureSize, SigningKey};
 use elliptic_curve::{
     ecdh::SharedSecret,
     ops::Invert,
@@ -16,7 +16,7 @@ use elliptic_curve::{
     AffinePoint, CurveArithmetic, FieldBytesSize, JwkParameters, PublicKey, Scalar,
 };
 use hkdf::hmac::digest::{
-    array::{Array, ArraySize},
+    generic_array::{ArrayLength, GenericArray},
     FixedOutputReset, KeyInit, Mac, OutputSizeUser,
 };
 use subtle::CtOption;
@@ -44,7 +44,7 @@ pub trait EncodedId:
     const TIMESTAMP_POLICY: u8;
 
     /// The ID type, used for initializing an empty ID array
-    type IdLen: ArraySize;
+    type IdLen: ArrayLength<u8>;
 
     /// Generates an ID without metadata and a MAC.
     ///
@@ -69,7 +69,7 @@ pub trait EncodedId:
         expire_time: Option<u64>,
         uses_associated_data: bool,
         version_epoch: u64,
-        rng: &mut dyn RngCore,
+        rng: &mut dyn Rng,
     ) -> Result<(Self, Option<u64>), IdCreationError>;
 
     /// Decompresses an expiration time into a timestamp referencing UNIX_EPOCH.
@@ -136,6 +136,31 @@ pub trait AllowedRngs {
 const MAC_STREAM_WORD: u32 = 33;
 const ECC_STREAM_WORD: u32 = 44;
 const SYMM_STREAM_WORD: u32 = 55;
+
+#[repr(C, packed(4))]
+struct ChaChaLastRow {
+    counter_32: u32,
+    mac_stream_word: u32,
+    mac_stream_word_2: u32,
+    version: u32,
+}
+
+impl ChaChaLastRow {
+    fn new(mac_stream_word: u32, version: u32) -> Self {
+        Self {
+            counter_32: 0u32.to_le(),
+            mac_stream_word: mac_stream_word.to_le(),
+            mac_stream_word_2: mac_stream_word.to_le(),
+            version: version.to_le(),
+        }
+    }
+
+    pub fn as_u32_ptr(&self) -> *const u32 {
+        let struct_pointer: *const Self = self;
+        struct_pointer as *const u32
+    }
+}
+
 macro_rules! allow_chacha_rng {
     ($($Rng:ident),*) => {
         $(impl AllowedRngs for $Rng {
@@ -149,20 +174,27 @@ macro_rules! allow_chacha_rng {
             }
 
             fn get_version_mac_salt(&mut self, version: u32, output_salt: &mut [u8]) {
-                self.set_stream([MAC_STREAM_WORD, MAC_STREAM_WORD, version]);
-                self.set_block_pos(0);
+                use chacha20::rand_core::Rng;
+
+                unsafe {
+                    self.set_last_row(ChaChaLastRow::new(MAC_STREAM_WORD, version).as_u32_ptr());
+                }
                 self.fill_bytes(output_salt)
             }
 
             fn get_version_ecc_salt(&mut self, version: u32, output_salt: &mut [u8]) {
-                self.set_stream([ECC_STREAM_WORD, ECC_STREAM_WORD, version]);
-                self.set_block_pos(0);
+                use chacha20::rand_core::Rng;
+                unsafe {
+                    self.set_last_row(ChaChaLastRow::new(ECC_STREAM_WORD, version).as_u32_ptr());
+                }
                 self.fill_bytes(output_salt);
             }
 
             fn get_version_symmetric_key_salt(&mut self, version: u32, output_salt: &mut [u8]) {
-                self.set_stream([SYMM_STREAM_WORD, SYMM_STREAM_WORD, version]);
-                self.set_block_pos(0);
+                use chacha20::rand_core::Rng;
+                unsafe {
+                    self.set_last_row(ChaChaLastRow::new(SYMM_STREAM_WORD, version).as_u32_ptr());
+                }
                 self.fill_bytes(output_salt)
             }
         })*
@@ -232,7 +264,7 @@ pub trait CryptoKeyGenerator: Sized {
         hkdf_key: &[u8],
         application_id: &[u8],
     ) -> (
-        Array<u8, <Self::HkdfDigest as OutputSizeUser>::OutputSize>,
+        GenericArray<u8, <Self::HkdfDigest as OutputSizeUser>::OutputSize>,
         Self,
     );
 
@@ -286,7 +318,7 @@ pub trait CryptoKeyGenerator: Sized {
         id_type: &[u8],
         expiration: Option<u64>,
         associated_data: Option<&[u8]>,
-        rng: &mut dyn RngCore,
+        rng: &mut dyn Rng,
     ) -> Result<Id, IdCreationError>
     where
         Id: EncodedId;
@@ -337,12 +369,12 @@ pub trait CryptoKeyGenerator: Sized {
         prefix: &[u8],
         expiration: Option<u64>,
         associated_data: Option<&[u8]>,
-        rng: &mut dyn RngCore,
+        rng: &mut dyn Rng,
     ) -> Result<(Id, SigningKey<C>), IdCreationError>
     where
-        C: EcdsaCurve + CurveArithmetic + JwkParameters,
-        Scalar<C>: Invert<Output = CtOption<Scalar<C>>>,
-        SignatureSize<C>: ArraySize,
+        C: PrimeCurve + CurveArithmetic + JwkParameters,
+        Scalar<C>: Invert<Output = CtOption<Scalar<C>>> + SignPrimitive<C>,
+        SignatureSize<C>: ArrayLength<u8>,
         Id: EncodedId;
 
     /// Validates an ECDSA key ID.
@@ -364,9 +396,9 @@ pub trait CryptoKeyGenerator: Sized {
         associated_data: Option<&[u8]>,
     ) -> Result<Id, InvalidId>
     where
-        C: EcdsaCurve + CurveArithmetic + JwkParameters,
-        Scalar<C>: Invert<Output = CtOption<Scalar<C>>>,
-        SignatureSize<C>: ArraySize,
+        C: PrimeCurve + CurveArithmetic + JwkParameters,
+        Scalar<C>: Invert<Output = CtOption<Scalar<C>>> + SignPrimitive<C>,
+        SignatureSize<C>: ArrayLength<u8>,
         Id: EncodedId;
 
     /// Generates an ECDSA private key from an ID. You might want to validate
@@ -389,9 +421,9 @@ pub trait CryptoKeyGenerator: Sized {
         associated_data: Option<&[u8]>,
     ) -> SigningKey<C>
     where
-        C: EcdsaCurve + CurveArithmetic + JwkParameters,
-        Scalar<C>: Invert<Output = CtOption<Scalar<C>>>,
-        SignatureSize<C>: ArraySize,
+        C: PrimeCurve + CurveArithmetic + JwkParameters,
+        Scalar<C>: Invert<Output = CtOption<Scalar<C>>> + SignPrimitive<C>,
+        SignatureSize<C>: ArrayLength<u8>,
         Id: EncodedId;
 
     /// Generates an ECDH public key with an optional expiration timestamp and
@@ -433,7 +465,7 @@ pub trait CryptoKeyGenerator: Sized {
         prefix: &[u8],
         expiration: Option<u64>,
         associated_data: Option<&[u8]>,
-        rng: &mut dyn RngCore,
+        rng: &mut dyn Rng,
     ) -> Result<(Id, PublicKey<C>), IdCreationError>
     where
         C: CurveArithmetic + JwkParameters,
@@ -477,7 +509,7 @@ pub trait CryptoKeyGenerator: Sized {
     /// function's `OutputSize * 255`. This should not happen unless the
     /// `FieldBytesSize` is ridiculously large.
     fn ecdh_using_key_id<C, Id>(
-        &self,
+        &mut self,
         id: &Id,
         associated_data: Option<&[u8]>,
         pubkey: PublicKey<C>,

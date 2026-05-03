@@ -20,11 +20,9 @@
 //! constant parameter to allow for automatically versioning IDs.
 
 use hkdf::hmac::digest::{
-    array::{Array, ArraySize},
+    generic_array::{ArrayLength, GenericArray},
     typenum::Unsigned,
 };
-
-use chacha20::rand_core::RngCore;
 use core::cmp::min;
 use core::marker::PhantomData;
 
@@ -74,7 +72,8 @@ use timestamp_policies::use_timestamps;
 /// Represents a Binary ID structure with configurable parameters for size,
 /// versioning, and expiration encoding.
 ///
-/// IDs will be of the type `Array<u8, IdLength>`, and will have this format:
+/// IDs will be of the type `GenericArray<u8, IdLength>`, and will have this
+/// format:
 ///
 /// `[Prefix][Metadata][PsuedorandomBytes][MAC]`
 ///
@@ -103,13 +102,13 @@ use timestamp_policies::use_timestamps;
 /// ```
 #[derive(Debug, Clone)]
 pub struct BinaryId<
-    IdLength: Unsigned + ArraySize,
+    IdLength: Unsigned + ArrayLength<u8>,
     MacLength: Unsigned,
     const MAX_PREFIX_LEN: usize,
     TimestampPolicy: Unsigned,
 > {
     /// A public id for this key
-    pub id: Array<u8, IdLength>,
+    pub id: GenericArray<u8, IdLength>,
     _mac_len: PhantomData<MacLength>,
     _timestamp_policy: PhantomData<TimestampPolicy>,
 }
@@ -151,7 +150,7 @@ where
 impl<IdLength, MacLength, const MAX_PREFIX_LEN: usize, TimestampPolicy> EncodedId
     for BinaryId<IdLength, MacLength, MAX_PREFIX_LEN, TimestampPolicy>
 where
-    IdLength: Unsigned + ArraySize,
+    IdLength: Unsigned + ArrayLength<u8>,
     MacLength: Unsigned,
     TimestampPolicy: Unsigned,
 {
@@ -184,7 +183,7 @@ where
         expire_time_seconds: Option<u64>,
         uses_accociated_data: bool,
         version_epoch: u64,
-        rng: &mut dyn RngCore,
+        rng: &mut dyn chacha20::rand_core::Rng,
     ) -> Result<(Self, Option<u64>), IdCreationError> {
         if let Some(ref timestamp) = &expire_time_seconds {
             if TimestampPolicy::U8.eq(&use_timestamps::Never::U8) {
@@ -212,7 +211,7 @@ where
         }
 
         let stream_start_idx: usize = min(prefix.len(), MAX_PREFIX_LEN);
-        let mut id: Array<u8, IdLength> = Default::default();
+        let mut id: GenericArray<u8, IdLength> = Default::default();
 
         id[..stream_start_idx].copy_from_slice(&prefix[..stream_start_idx]);
         rng.fill_bytes(&mut id[stream_start_idx..Self::MAC_START_INDEX]);
@@ -323,7 +322,7 @@ where
 impl<IdLength, MacLength, const MAX_PREFIX_LEN: usize, TimestampPolicy> AsRef<[u8]>
     for BinaryId<IdLength, MacLength, MAX_PREFIX_LEN, TimestampPolicy>
 where
-    IdLength: Unsigned + ArraySize,
+    IdLength: Unsigned + ArrayLength<u8>,
     MacLength: Unsigned,
     TimestampPolicy: Unsigned,
 {
@@ -335,7 +334,7 @@ where
 impl<IdLength, MacLength, const MAX_PREFIX_LEN: usize, TimestampPolicy> Default
     for BinaryId<IdLength, MacLength, MAX_PREFIX_LEN, TimestampPolicy>
 where
-    IdLength: Unsigned + ArraySize,
+    IdLength: Unsigned + ArrayLength<u8>,
     MacLength: Unsigned,
     TimestampPolicy: Unsigned,
 {
@@ -351,7 +350,7 @@ where
 impl<IdLength, MacLength, const MAX_PREFIX_LEN: usize, TimestampPolicy> AsMut<[u8]>
     for BinaryId<IdLength, MacLength, MAX_PREFIX_LEN, TimestampPolicy>
 where
-    IdLength: Unsigned + ArraySize,
+    IdLength: Unsigned + ArrayLength<u8>,
     MacLength: Unsigned,
     TimestampPolicy: Unsigned,
 {
@@ -363,7 +362,7 @@ where
 impl<IdLength, MacLength, const MAX_PREFIX_LEN: usize, TimestampPolicy> TryFrom<&[u8]>
     for BinaryId<IdLength, MacLength, MAX_PREFIX_LEN, TimestampPolicy>
 where
-    IdLength: Unsigned + ArraySize,
+    IdLength: Unsigned + ArrayLength<u8>,
     MacLength: Unsigned,
     TimestampPolicy: Unsigned,
 {
@@ -381,7 +380,7 @@ where
             return Err(Self::Error::IncorrectLength);
         }
 
-        let mut id: Array<u8, IdLength> = Default::default();
+        let mut id: GenericArray<u8, IdLength> = Default::default();
         id.copy_from_slice(&id_slice);
 
         Ok(Self {
@@ -394,7 +393,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    use chacha20::rand_core::OsRng;
     use hkdf::hmac::digest::consts::{U48, U5};
 
     use crate::VersioningConfig;
@@ -410,10 +408,12 @@ mod tests {
         type IdVersion1 = BinaryId<U48, U5, PREFIX_LEN, use_timestamps::Sometimes>;
 
         let (id_with_associated_data, _) =
-            IdVersion1::generate::<TestVersionConfig>(&[], None, true, 3, &mut OsRng).unwrap();
+            IdVersion1::generate::<TestVersionConfig>(&[], None, true, 3, &mut rand::rng())
+                .unwrap();
 
         let (id_without_associated_data, _) =
-            IdVersion1::generate::<TestVersionConfig>(&[], None, false, 3, &mut OsRng).unwrap();
+            IdVersion1::generate::<TestVersionConfig>(&[], None, false, 3, &mut rand::rng())
+                .unwrap();
 
         assert!(
             id_with_associated_data.uses_associated_data(),

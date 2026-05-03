@@ -41,20 +41,15 @@
 //! use p256::NistP256;
 //! use sha2::Sha256;
 //! use private_key_generator::{
-//!     Id, typenum::consts::{U48, U4}, KeyGenerator
+//!     BinaryId, id::timestamp_policies::use_timestamps, typenum::consts::{U48, U4}, KeyGenerator
 //! };
 //! use zeroize::Zeroize;
 //!
-//! // an EPOCH reference point for encoding timestamps with only 3 bytes
-//! const EPOCH: u64 = 1709349508;
-//! type EccKeyIdV1 = Id<
-//!     U48,   // binary encoded ID length
-//!     U4,    // binary encoded HMAC length
-//!     6,     // max prefix length; use multiple of 3 for Base64 representation
-//!     0,     // Info byte offset
-//!     1,     // version number
-//!     5,     // number of bits used to represent the version number
-//!     EPOCH
+//! type EccKeyIdV1 = BinaryId<
+//!     U48,                        // binary encoded ID length
+//!     U4,                         // binary encoded HMAC length
+//!     6,                          // max prefix length; use multiple of 3 for Base64 representation
+//!     use_timestamps::Sometimes,  // timestamp policy
 //! >;
 //!
 //! /// You can make a private function for initializing a key generator, and
@@ -104,7 +99,6 @@
 #![allow(incomplete_features)]
 #![feature(generic_const_exprs)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
-#![forbid(unsafe_code)]
 #![warn(missing_docs, rust_2018_idioms)]
 
 #[cfg(feature = "std")]
@@ -153,25 +147,11 @@ macro_rules! error_log {
     }};
 }
 
+/// Conditionally puts out debugging messages based on the logging feature.
 #[macro_export]
 macro_rules! debug_log {
     ($($arg:tt)*) => {{
         #[cfg(feature = "logging")]
         tracing::debug!($($arg)*)
     }};
-}
-
-#[cfg(all(feature = "std", test))]
-pub(crate) mod time {
-    pub use mock_instant::thread_local::{SystemTime, UNIX_EPOCH};
-}
-
-#[cfg(all(feature = "std", not(test)))]
-pub(crate) mod time {
-    pub use std::time::{SystemTime, UNIX_EPOCH};
-}
-
-#[cfg(not(feature = "std"))]
-pub(crate) mod time {
-    pub use core::time::Duration;
 }

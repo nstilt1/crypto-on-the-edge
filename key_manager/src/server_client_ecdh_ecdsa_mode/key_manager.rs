@@ -1,11 +1,12 @@
 use core::marker::PhantomData;
 use private_key_generator::{
     ecdsa::{
-        hazmat::DigestPrimitive, signature::DigestSigner, EcdsaCurve, Signature, SignatureSize,
-        SigningKey,
+        hazmat::{DigestPrimitive, SignPrimitive},
+        signature::DigestSigner,
+        PrimeCurve, Signature, SignatureSize, SigningKey,
     },
     elliptic_curve::{
-        array::ArraySize,
+        generic_array::ArrayLength,
         ops::Invert,
         pkcs8::AssociatedOid,
         point::PointCompression,
@@ -15,6 +16,7 @@ use private_key_generator::{
     },
     error::IdCreationError,
     hkdf::hmac::digest::core_api::BlockSizeUser,
+    prelude::rand_core::Rng,
     typenum::Unsigned,
     CryptoKeyGenerator, Digest, EncodedId,
 };
@@ -29,7 +31,10 @@ use base64::{
     engine::{self, GeneralPurpose},
     Engine,
 };
+use private_key_generator::prelude::rand_core;
 use prost::Message;
+use rand::rngs::SysRng;
+use rand::TryRng;
 use rand_core::{CryptoRng, SeedableRng};
 
 use crate::{
@@ -44,12 +49,14 @@ use private_key_generator::Zeroize;
 
 /// Short-hand for making a new key manager from a key generator
 macro_rules! new_key_manager {
-    ($key_gen:expr, $b64:expr, $b64_alphabet:expr) => {
+    ($key_gen:expr, $b64:expr, $b64_alphabet:expr) => {{
+        let mut seed = [0u8; 32];
+        SysRng.try_fill_bytes(&mut seed).unwrap();
         Self {
             key_generator: $key_gen,
             symmetric_key: Vec::new(),
             nonce: Vec::new(),
-            rng: FastRng::from_entropy(),
+            rng: FastRng::from_seed(seed),
             client_id: CId::default(),
             ecdsa_key_id: EcdsaKId::default(),
             is_handshake: false,
@@ -61,7 +68,7 @@ macro_rules! new_key_manager {
             b64_engine: $b64,
             base64_alphabet: $b64_alphabet,
         }
-    };
+    }};
 }
 
 /// A private key manager.
@@ -103,14 +110,14 @@ pub struct HttpPrivateKeyManager<
     FieldBytesSize<Ecdh>: ModulusSize,
     AffinePoint<Ecdh>: FromEncodedPoint<Ecdh> + ToEncodedPoint<Ecdh>,
     EcdhKdfDigest: BlockSizeUser + Clone + Digest,
-    Ecdsa: EcdsaCurve + CurveArithmetic + JwkParameters,
+    Ecdsa: PrimeCurve + CurveArithmetic + JwkParameters,
     EcdsaDigest: Digest,
-    Scalar<Ecdsa>: Invert<Output = CtOption<Scalar<Ecdsa>>>,
-    SignatureSize<Ecdsa>: ArraySize,
+    Scalar<Ecdsa>: Invert<Output = CtOption<Scalar<Ecdsa>>> + SignPrimitive<Ecdsa>,
+    SignatureSize<Ecdsa>: ArrayLength<u8>,
     ClientId: EncodedId,
     EcdhKeyId: EncodedId,
     EcdsaKeyId: EncodedId,
-    FastRng: CryptoRng + SeedableRng,
+    FastRng: CryptoRng + Rng + SeedableRng,
 {
     /// the key generator. You may use this directly if you need to.
     pub key_generator: KeyGen,
@@ -154,14 +161,14 @@ where
     FieldBytesSize<Ecdh>: ModulusSize,
     AffinePoint<Ecdh>: FromEncodedPoint<Ecdh> + ToEncodedPoint<Ecdh>,
     EcdhKdf: BlockSizeUser + Clone + Digest,
-    Ecdsa: EcdsaCurve + CurveArithmetic + JwkParameters + DigestPrimitive,
+    Ecdsa: PrimeCurve + CurveArithmetic + JwkParameters + DigestPrimitive,
     EcdsaDigest: Digest,
-    Scalar<Ecdsa>: Invert<Output = CtOption<Scalar<Ecdsa>>>,
-    SignatureSize<Ecdsa>: ArraySize,
+    Scalar<Ecdsa>: Invert<Output = CtOption<Scalar<Ecdsa>>> + SignPrimitive<Ecdsa>,
+    SignatureSize<Ecdsa>: ArrayLength<u8>,
     CId: EncodedId,
     EcdhKId: EncodedId,
     EcdsaKId: EncodedId,
-    FastRng: CryptoRng + SeedableRng,
+    FastRng: CryptoRng + Rng + SeedableRng<Seed = [u8; 32]>,
 {
     /// Initializes this structure using your Key Generator.
     ///
@@ -286,9 +293,9 @@ where
         associated_data: Option<&[u8]>,
     ) -> Result<(Id<IdType>, SigningKey<C>), IdCreationError>
     where
-        C: EcdsaCurve + JwkParameters + CurveArithmetic,
-        Scalar<C>: Invert<Output = CtOption<Scalar<C>>>,
-        SignatureSize<C>: ArraySize,
+        C: PrimeCurve + JwkParameters + CurveArithmetic,
+        Scalar<C>: Invert<Output = CtOption<Scalar<C>>> + SignPrimitive<C>,
+        SignatureSize<C>: ArrayLength<u8>,
         IdType: EncodedId,
     {
         let (decoded_prefix, truncate_len) = self.decode_and_truncate_prefix::<IdType>(prefix);
@@ -326,9 +333,9 @@ where
         associated_data: Option<&[u8]>,
     ) -> Result<Id<IdType>, ProtocolError>
     where
-        C: EcdsaCurve + JwkParameters + CurveArithmetic,
-        Scalar<C>: Invert<Output = CtOption<Scalar<C>>>,
-        SignatureSize<C>: ArraySize,
+        C: PrimeCurve + JwkParameters + CurveArithmetic,
+        Scalar<C>: Invert<Output = CtOption<Scalar<C>>> + SignPrimitive<C>,
+        SignatureSize<C>: ArrayLength<u8>,
         IdType: EncodedId,
     {
         // trimming length to a size greater than the ID length because there could be
@@ -397,9 +404,9 @@ where
         key_id: &Id<KeyId>,
     ) -> Result<Signature<C>, ProtocolError>
     where
-        C: EcdsaCurve + CurveArithmetic + JwkParameters + DigestPrimitive,
-        Scalar<C>: Invert<Output = CtOption<Scalar<C>>>,
-        SignatureSize<C>: ArraySize,
+        C: PrimeCurve + CurveArithmetic + JwkParameters + DigestPrimitive,
+        Scalar<C>: Invert<Output = CtOption<Scalar<C>>> + SignPrimitive<C>,
+        SignatureSize<C>: ArrayLength<u8>,
         KeyId: EncodedId,
         Hash: Digest,
     {
@@ -839,7 +846,7 @@ where
             &mut key,
         );
         let mut nonce = aead::Nonce::<Aead_>::default();
-        self.rng.fill_bytes(&mut nonce);
+        Rng::fill_bytes(&mut self.rng, &mut nonce);
         let encryptor = Aead_::new(&key);
         let mut encrypted = encryptor.encrypt(&nonce, data)?;
         let mut prefix = [&version, nonce.as_slice()].concat();
@@ -900,7 +907,6 @@ mod tests {
     use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
     use p384::{ecdh::EphemeralSecret, NistP384};
     use private_key_generator::hkdf::hmac::Hmac;
-    use rand_core_previous::OsRng;
 
     use crate::prelude::*;
     use sha2::Sha384;
@@ -955,7 +961,7 @@ mod tests {
             )
             .unwrap();
 
-        let client_key = EphemeralSecret::random(&mut OsRng);
+        let client_key = EphemeralSecret::random(&mut aead::OsRng);
 
         let ecdh_info = b"test_info".to_vec();
         let ecdh_salt = b"test salt".to_vec();
@@ -1016,7 +1022,7 @@ mod tests {
 
     #[test]
     fn ecdh_tests() {
-        let private_key = EphemeralSecret::random(&mut OsRng);
+        let private_key = EphemeralSecret::random(&mut aead::OsRng);
         let mut server_key_manager = init_key_manager();
         let server_ecdh_keys: (BigId, PublicKey<NistP384>) = server_key_manager
             .generate_ecdh_pubkeys_and_ids(1, None)
@@ -1195,7 +1201,7 @@ mod tests {
             )
             .unwrap();
 
-        let client_ecdh_key = EphemeralSecret::random(&mut OsRng);
+        let client_ecdh_key = EphemeralSecret::random(&mut aead::OsRng);
 
         let initial_shared_secret = client_ecdh_key.diffie_hellman(&generated_ecdh_pubkey);
 
@@ -1234,7 +1240,7 @@ mod tests {
             .generate_keyless_id::<BigId>("", client_id_type, None, None)
             .unwrap();
 
-        let client_ecdh_key = EphemeralSecret::random(&mut OsRng);
+        let client_ecdh_key = EphemeralSecret::random(&mut aead::OsRng);
 
         let initial_shared_secret = client_ecdh_key.diffie_hellman(&server_key.1);
 
@@ -1254,15 +1260,133 @@ mod tests {
     #[test]
     fn improper_ecdh_key_expiration() {
         let mut key_manager = init_key_manager();
-        let (key_id, pubkey) = key_manager
+        let (key_id, _pubkey) = key_manager
             .key_generator
             .generate_ecdh_pubkey_and_id::<NistP384, BigId>(
                 &[],
                 None,
                 Some(key_manager.client_id.as_ref()),
                 &mut key_manager.rng,
-            ).unwrap();
-        let (version, timestamp) = key_manager.key_generator.decode_version_and_timestamp_from_id::<BigId>(&key_id);
+            )
+            .unwrap();
+        let (_version, timestamp) = key_manager
+            .key_generator
+            .decode_version_and_timestamp_from_id::<BigId>(&key_id);
         assert!(timestamp.is_none());
+    }
+
+    mod equivalence_tests {
+        use super::*;
+        use base64::prelude::BASE64_STANDARD as B64;
+        use p384::pkcs8::EncodePrivateKey;
+        type EcdsaKeyId2 = BinaryId<U48, U10, 6, use_timestamps::Never>;
+
+        #[test]
+        fn key_validation() {
+            let mut key_manager = init_key_manager();
+            let mut associated_data = None;
+            let keyless_id_type = b"key id type";
+
+            // no associated data
+            let keyless_id = key_manager
+                .generate_keyless_id::<BigId>("keyless", keyless_id_type, None, associated_data)
+                .unwrap();
+            let (server_ecdh_key_id, server_ecdh_pubkey): (BigId, PublicKey<NistP384>) =
+                key_manager.generate_ecdh_pubkeys_and_ids(1, None).unwrap()[0].clone();
+            let (server_ecdsa_key_id, server_ecdsa_key) = key_manager
+                .generate_ecdsa_key_and_id::<NistP384, EcdsaKeyId2>("test", None, associated_data)
+                .unwrap();
+            println!("Keyless id: {}", keyless_id.encoded_id);
+            println!("server_ecdh_key_id: {}", B64.encode(server_ecdh_key_id.id));
+            println!(
+                "server_ecdh_pubkey: {}",
+                B64.encode(server_ecdh_pubkey.to_sec1_bytes())
+            );
+            println!("server_ecdsa_key_id: {}", server_ecdsa_key_id.encoded_id);
+            println!(
+                "server_ecdsa_key: {}",
+                B64.encode(
+                    server_ecdsa_key
+                        .to_pkcs8_der()
+                        .expect("should be valid")
+                        .as_bytes()
+                )
+            );
+
+            // validation
+            let validated_keyless = key_manager.validate_keyless_id::<BigId>(
+                "keylesswMoelIzvk_eQxVJ2h6VEQzW/xGAnfjr5um1wzv/zPjo4e0fnPz2QxrvKR",
+                keyless_id_type,
+                associated_data,
+            );
+            assert!(validated_keyless.is_ok());
+            let validated_ecdh = key_manager.key_generator.validate_ecdh_key_id::<BigId>(
+                B64.decode("yY4/bvtgFPGl2LNEn87p/C9RdMlW6KeorsWk9eQFVhOoqn66BPbI5LBszEObodgn")
+                    .unwrap()
+                    .as_slice(),
+                associated_data,
+            );
+            assert!(
+                validated_ecdh.as_ref().is_ok(),
+                "ECDH key id validation failed"
+            );
+            let validated_ecdsa_key_id = key_manager
+                .validate_ecdsa_key_id::<NistP384, EcdsaKeyId2>(
+                    "testtRS0NyqUtRspoDut1vVs5hZRqOyK/czUrzV0six_mLSLt0yTYHPeJoWZg/bk",
+                    None,
+                );
+            assert!(
+                validated_ecdsa_key_id.as_ref().is_ok(),
+                "Ecdsa Key id validation failed"
+            );
+            // with associated_data
+            associated_data = Some(b"associated data");
+
+            let keyless_id = key_manager
+                .generate_keyless_id::<BigId>("keyless", keyless_id_type, None, associated_data)
+                .unwrap();
+            let (server_ecdh_key_id, server_ecdh_pubkey): (BigId, PublicKey<NistP384>) =
+                key_manager.generate_ecdh_pubkeys_and_ids(1, None).unwrap()[0].clone();
+            let (server_ecdsa_key_id, server_ecdsa_key) = key_manager
+                .generate_ecdsa_key_and_id::<NistP384, EcdsaKeyId2>("test", None, associated_data)
+                .unwrap();
+            println!("Keyless id: {}", keyless_id.encoded_id);
+            println!("server_ecdh_key_id: {}", B64.encode(server_ecdh_key_id.id));
+            println!(
+                "server_ecdh_pubkey: {}",
+                B64.encode(server_ecdh_pubkey.to_sec1_bytes())
+            );
+            println!("server_ecdsa_key_id: {}", server_ecdsa_key_id.encoded_id);
+            println!(
+                "server_ecdsa_key: {}",
+                B64.encode(
+                    server_ecdsa_key
+                        .to_pkcs8_der()
+                        .expect("should be valid")
+                        .as_bytes()
+                )
+            );
+
+            // validation
+            let validated_ecdh = key_manager.key_generator.validate_ecdh_key_id::<BigId>(
+                B64.decode("yY4/bvtgFPGl2LNEn87p/C9RdMlW6KeorsWk9eQFVhOoqn66BPbI5LBszEObodgn")
+                    .unwrap()
+                    .as_slice(),
+                associated_data,
+            );
+            assert!(
+                validated_ecdh.as_ref().is_ok(),
+                "ECDH key id validation failed"
+            );
+            let validated_ecdsa_key_id = key_manager
+                .validate_ecdsa_key_id::<NistP384, EcdsaKeyId2>(
+                    "testtRS0NyqUtRspoDut1vVs5hZRqOyK/czUrzV0six_mLSLt0yTYHPeJoWZg/bk",
+                    None,
+                );
+            assert!(
+                validated_ecdsa_key_id.as_ref().is_ok(),
+                "Ecdsa Key id validation failed"
+            );
+        }
     }
 }

@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo check *)",
+      "Bash(cargo metadata *)",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); [print\\(p['name'],p['version']\\) for p in d['packages'] if p['name'] in ['ecdsa','elliptic-curve','hkdf','chacha20','digest','sha2','sha3','rand_core']]\")",
+      "Bash(grep -A 5 \"undeclared type \\\\`Array\\\\`\\\\|multiple applicable\\\\|SignPrimitive\")",
+      "Bash(grep -A 5 \"undeclared type \\\\`Array\\\\`\\\\|multiple applicable\")"
+    ]
+  }
+}

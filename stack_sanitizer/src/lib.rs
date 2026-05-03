@@ -19,7 +19,10 @@ mod heap_struct;
 
 pub use heap_struct::ZeroizingHeapStack;
 
-#[deprecated(note = "Stack switching backend disabled (psm_stack_manipulation! expanded to `no`). Falling back to running crypto_fn() on the current stack.")]
+#[deprecated(
+    note = "Stack switching backend disabled (psm_stack_manipulation! expanded to `no`). Falling \
+            back to running crypto_fn() on the current stack."
+)]
 #[allow(dead_code)]
 pub const _STACK_SWITCHING_DISABLED_WARNING: () = ();
 
@@ -100,7 +103,7 @@ psm_stack_manipulation! {
         const _: () = {
             let _ = $crate::_STACK_SWITCHING_DISABLED_WARNING;
         };
-        
+
         fn _switch_stacks(zeroizing_heap_stack: &mut ZeroizingHeapStack, crypto_fn: &mut dyn FnMut()) {
             let _ = zeroizing_heap_stack;
             crypto_fn();
