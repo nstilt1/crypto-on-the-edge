@@ -477,7 +477,7 @@ pub trait CryptoKeyGenerator: Sized {
     /// function's `OutputSize * 255`. This should not happen unless the
     /// `FieldBytesSize` is ridiculously large.
     fn ecdh_using_key_id<C, Id>(
-        &self,
+        &mut self,
         id: &Id,
         associated_data: Option<&[u8]>,
         pubkey: PublicKey<C>,

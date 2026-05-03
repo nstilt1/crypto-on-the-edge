@@ -2,9 +2,6 @@
 members = [ 
     "example", 
     "key_manager", 
-    "key_manager_docs",
     "private_key_generator",
-    "private_key_generator_docs",
-    "zero_stack",
     "benches"
 ]

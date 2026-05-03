@@ -1249,4 +1249,71 @@ mod tests {
             server_shared_secret.raw_secret_bytes()
         )
     }
+
+    mod equivalence_tests {
+        use super::*;
+        use base64::prelude::BASE64_STANDARD as B64;
+        use p384::pkcs8::EncodePrivateKey;
+        type EcdsaKeyId2 = BinaryId<U48, U10, 6, use_timestamps::Never>;
+
+        #[test]
+        fn ecdh_keys() {
+            let mut key_manager = init_key_manager();
+            let mut associated_data = None;
+            let keyless_id_type = b"key id type";
+
+            // no associated data
+            let keyless_id = key_manager.generate_keyless_id::<BigId>("keyless", keyless_id_type, None, associated_data).unwrap();
+            let (server_ecdh_key_id, server_ecdh_pubkey): (BigId, PublicKey<NistP384>) = key_manager
+                .generate_ecdh_pubkeys_and_ids(1, None)
+                .unwrap()[0]
+                .clone();
+            let (server_ecdsa_key_id, server_ecdsa_key) = key_manager
+                .generate_ecdsa_key_and_id::<NistP384, EcdsaKeyId2>(
+                    "test",
+                    None,
+                    associated_data,
+                )
+                .unwrap();
+            println!("Keyless id: {}", keyless_id.encoded_id);
+            println!("server_ecdh_key_id: {}", B64.encode(server_ecdh_key_id.id));
+            println!("server_ecdh_pubkey: {}", B64.encode(server_ecdh_pubkey.to_sec1_bytes()));
+            println!("server_ecdsa_key_id: {}", server_ecdsa_key_id.encoded_id);
+            println!("server_ecdsa_key: {}", B64.encode(server_ecdsa_key.to_pkcs8_der().expect("should be valid").as_bytes()));
+
+            // validation
+            let validated_keyless = key_manager.validate_keyless_id::<BigId>("keylesswMoelIzvk_eQxVJ2h6VEQzW/xGAnfjr5um1wzv/zPjo4e0fnPz2QxrvKR", keyless_id_type, associated_data);
+            assert!(validated_keyless.is_ok());
+            let validated_ecdh = key_manager.key_generator.validate_ecdh_key_id::<BigId>(B64.decode("yY4/bvtgFPGl2LNEn87p/C9RdMlW6KeorsWk9eQFVhOoqn66BPbI5LBszEObodgn").unwrap().as_slice(), associated_data);
+            assert!(validated_ecdh.as_ref().is_ok(), "ECDH key id validation failed");
+            let validated_ecdsa_key_id = key_manager.validate_ecdsa_key_id::<NistP384, EcdsaKeyId2>("testtRS0NyqUtRspoDut1vVs5hZRqOyK/czUrzV0six_mLSLt0yTYHPeJoWZg/bk", None);
+            assert!(validated_ecdsa_key_id.as_ref().is_ok(), "Ecdsa Key id validation failed");
+            // with associated_data
+            associated_data = Some(b"associated data");
+
+            let keyless_id = key_manager.generate_keyless_id::<BigId>("keyless", keyless_id_type, None, associated_data).unwrap();
+            let (server_ecdh_key_id, server_ecdh_pubkey): (BigId, PublicKey<NistP384>) = key_manager
+                .generate_ecdh_pubkeys_and_ids(1, None)
+                .unwrap()[0]
+                .clone();
+            let (server_ecdsa_key_id, server_ecdsa_key) = key_manager
+                .generate_ecdsa_key_and_id::<NistP384, EcdsaKeyId2>(
+                    "test",
+                    None,
+                    associated_data,
+                )
+                .unwrap();
+            println!("Keyless id: {}", keyless_id.encoded_id);
+            println!("server_ecdh_key_id: {}", B64.encode(server_ecdh_key_id.id));
+            println!("server_ecdh_pubkey: {}", B64.encode(server_ecdh_pubkey.to_sec1_bytes()));
+            println!("server_ecdsa_key_id: {}", server_ecdsa_key_id.encoded_id);
+            println!("server_ecdsa_key: {}", B64.encode(server_ecdsa_key.to_pkcs8_der().expect("should be valid").as_bytes()));
+
+            // validation
+            let validated_ecdh = key_manager.key_generator.validate_ecdh_key_id::<BigId>(B64.decode("yY4/bvtgFPGl2LNEn87p/C9RdMlW6KeorsWk9eQFVhOoqn66BPbI5LBszEObodgn").unwrap().as_slice(), associated_data);
+            assert!(validated_ecdh.as_ref().is_ok(), "ECDH key id validation failed");
+            let validated_ecdsa_key_id = key_manager.validate_ecdsa_key_id::<NistP384, EcdsaKeyId2>("testtRS0NyqUtRspoDut1vVs5hZRqOyK/czUrzV0six_mLSLt0yTYHPeJoWZg/bk", None);
+            assert!(validated_ecdsa_key_id.as_ref().is_ok(), "Ecdsa Key id validation failed");
+        }
+    }
 }

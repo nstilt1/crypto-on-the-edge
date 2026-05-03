@@ -19,6 +19,7 @@ tracing = { version = "0.1.40", optional = true }
 prost-build = { version = "0.13.1", optional = true }
 
 [dev-dependencies]
+base64 = "0.22"
 chacha20poly1305 = "0.10"
 p384 = { git = "https://github.com/RustCrypto/elliptic-curves.git", branch = "master", package = "p384", version = "0.14.0-pre", features = ["jwk", "ecdsa"]  }
 rand_core_previous = { version = "0.6", features = ["getrandom"], package = "rand_core"}
