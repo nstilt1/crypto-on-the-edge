@@ -23,7 +23,7 @@ doctest = false # need to change this before publishing
 [dependencies]
 chacha20 = { git = "https://github.com/RustCrypto/stream-ciphers.git", rev = "5e19de3", default-features = false, package = "chacha20", features = ["rng"] }
 ecdsa = { version = "0.17.0-pre.5", features = ["signing"]}
-elliptic-curve = { version = "0.14.0-pre.5", features = ["ecdh", "jwk", "pem", "pkcs8"] }
+elliptic-curve = { version = "=0.14.0-pre.5", features = ["ecdh", "jwk", "pem", "pkcs8"] }
 #elliptic-curve = { version = "0.14.0-pre.5", git = "https://github.com/RustCrypto/traits.git", branch = "master", package = "elliptic-curve", features = ["ecdh", "jwk", "pem"] }
 hkdf = "=0.13.0-pre.3"
 #rand_chacha = { version = "0.3" }
@@ -43,6 +43,7 @@ trybuild = "1"
 
 [features]
 default = ["std"]
+enhanced_ecc_generation = []
 logging = ["tracing"]
 std = ["hkdf/std"] # std is required for checking timestamps against UNIX_EPOCH
 zeroize = ["dep:zeroize"]

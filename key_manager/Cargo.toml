@@ -10,7 +10,7 @@ license = "MIT OR Apache-2.0"
 aead = { version = "0.5", features = ["alloc"] }
 #aead = { version = "0.6.0-pre.0", features = ["alloc"] }
 base64 = "0.22.0"
-private_key_generator = { path = "../private_key_generator" }
+private_key_generator = { path = "../private_key_generator", default-features = false, features = ["std"] }
 prost = "0.13.1"
 rand_core = { version = "0.9.0-alpha.1", features = ["getrandom"]}
 tracing = { version = "0.1.40", optional = true }
@@ -26,6 +26,7 @@ sha2 = "0.11.0-pre.3"
 
 [features]
 default = ["server_client_ecdh_ecdsa_mode"]
+enhanced_ecc_generation = ["private_key_generator/enhanced_ecc_generation"]
 server_client_ecdh_ecdsa_mode = []
 single_party_mode = []
 logging = ["tracing", "private_key_generator/logging"]

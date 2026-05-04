@@ -5,6 +5,5 @@ members = [
     "key_manager", 
     "private_key_generator",
     "stack_sanitizer",
-    "zero_stack",
     "benches"
 ]

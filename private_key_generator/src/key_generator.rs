@@ -905,6 +905,14 @@ where
             &[]
         };
 
+        let (version, _timestamp) = self.decode_version_and_timestamp_from_id(&id);
+        let mut ecc_salt_buffer = self.current_version_ecc_salt.clone();
+        if version.ne(&self.current_version) {
+            self.rng.get_version_ecc_salt(version, &mut ecc_salt_buffer);
+        };
+        #[cfg(not(feature = "enhanced_ecc_generation"))]
+        let ecc_salt_buffer = &[];
+
         let mut key_bytes = FieldBytes::<C>::default();
         let mut ctr: u8 = 0;
         let private_ecdsa_key: SigningKey<C> = loop {
@@ -914,6 +922,7 @@ where
                         b"ecdsa",
                         C::CRV.as_ref(),
                         id.as_ref(),
+                        ecc_salt_buffer.as_slice(),
                         additional_info,
                         &[ctr],
                     ],
@@ -1008,6 +1017,15 @@ where
         } else {
             &[]
         };
+
+        let (version, _timestamp) = self.decode_version_and_timestamp_from_id(id);
+        let mut ecc_salt_buffer = self.current_version_ecc_salt.clone();
+        if version.ne(&self.current_version) {
+            self.rng.get_version_ecc_salt(version, &mut ecc_salt_buffer);
+        };
+        #[cfg(not(feature = "enhanced_ecc_generation"))]
+        let ecc_salt_buffer = &[];
+
         let mut key_bytes = FieldBytes::<C>::default();
         let mut ctr: u8 = 0;
         let private_ecdsa_key: SigningKey<C> = loop {
@@ -1017,6 +1035,7 @@ where
                         b"ecdsa",
                         C::CRV.as_ref(),
                         id.as_ref(),
+                        ecc_salt_buffer.as_slice(),
                         additional_info,
                         &[ctr],
                     ],
@@ -1069,6 +1088,14 @@ where
             &[]
         };
 
+        let (version, _timestamp) = self.decode_version_and_timestamp_from_id(&id);
+        let mut ecc_salt_buffer = self.current_version_ecc_salt.clone();
+        if version.ne(&self.current_version) {
+            self.rng.get_version_ecc_salt(version, &mut ecc_salt_buffer);
+        };
+        #[cfg(not(feature = "enhanced_ecc_generation"))]
+        let ecc_salt_buffer = &[];
+
         let mut ctr: u8 = 0;
         let pubkey: PublicKey<C> = loop {
             let mut key_bytes: FieldBytes<C> = Default::default();
@@ -1078,6 +1105,7 @@ where
                         b"ecdh",
                         C::CRV.as_ref(),
                         id.as_ref(),
+                        ecc_salt_buffer.as_slice(),
                         additional_info,
                         &[ctr],
                     ],
@@ -1147,7 +1175,7 @@ where
 
     #[inline]
     fn ecdh_using_key_id<C, Id>(
-        &self,
+        &mut self,
         id: &Id,
         associated_data: Option<&[u8]>,
         pubkey: PublicKey<C>,
@@ -1169,6 +1197,15 @@ where
             &[]
         };
 
+        let (version, _timestamp) = self.decode_version_and_timestamp_from_id(id);
+        let mut ecc_salt_buffer = self.current_version_ecc_salt.clone();
+        if version.ne(&self.current_version) {
+            self.rng.get_version_ecc_salt(version, &mut ecc_salt_buffer);
+        };
+        #[cfg(not(feature = "enhanced_ecc_generation"))]
+        let ecc_salt_buffer = &[];
+        
+
         let mut key_bytes: FieldBytes<C>;
         let mut ctr: u8 = 0;
         #[allow(unused_mut)]
@@ -1180,6 +1217,7 @@ where
                         b"ecdh",
                         C::CRV.as_ref(),
                         id.as_ref(),
+                        ecc_salt_buffer.as_slice(),
                         additional_info,
                         &[ctr],
                     ],
@@ -1420,7 +1458,7 @@ mod tests {
 
         use super::{
             years_to_seconds, CryptoKeyGenerator, Hmac, InvalidId, SeedableRng, Sha256,
-            Sha2KeyGenerator, StdRng, TestId, TEST_EPOCH, TEST_HMAC_KEY, TEST_ID_TYPE,
+            StdRng, TestId, TEST_EPOCH, TEST_ID_TYPE,
         };
 
         #[test]
